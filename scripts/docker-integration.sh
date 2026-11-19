@@ -72,7 +72,10 @@ expect() {
 
 expect_log() {
     # expect_log NAME CONTAINER NEEDLE
-    if docker logs "$2" 2>&1 | grep -qF -- "$3"; then pass "$1"; else fail "$1" "log does not contain '$3'"; fi
+    # Capture first: with pipefail, `grep -q` exiting early would SIGPIPE `docker logs`.
+    local logs
+    logs="$(docker logs "$2" 2>&1)"
+    if grep -qF -- "$3" <<< "$logs"; then pass "$1"; else fail "$1" "log does not contain '$3'"; fi
 }
 
 save_container_logs() {

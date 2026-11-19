@@ -1,0 +1,88 @@
+# rustinx developer commands. See TESTING.md section 11.
+# No target pushes, publishes or removes Docker resources it did not create.
+
+SHELL := /usr/bin/env bash
+.SHELLFLAGS := -euo pipefail -c
+
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+DEV_IMAGE := rustinx:dev
+RELEASE_IMAGE := rustinx:$(VERSION)
+DEV_COMPOSE := docker compose -p rustinx-dev -f docker-compose.yml
+SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh tests/fixtures/*.sh)
+
+.PHONY: help build test test-unit test-integration test-host test-docker test-e2e test-clean \
+	lint security cache-clean release dev-up dev-down dev-logs
+
+help:
+	@echo "build             cargo release build + $(DEV_IMAGE) image"
+	@echo "test              unit + integration tests (host and Docker)"
+	@echo "test-unit         unit tests"
+	@echo "test-integration  host integration tests (fake nginx) + Docker integration tests (real nginx)"
+	@echo "test-e2e          end-to-end ACME tests (not available until Phase 2)"
+	@echo "test-clean        remove leftover resources of interrupted test runs (run-scoped only)"
+	@echo "lint              rustfmt, clippy, shell syntax (+ shellcheck/hadolint if installed)"
+	@echo "security          cargo audit (requires cargo-audit)"
+	@echo "cache-clean       remove project-owned caches (requires CONFIRM=yes)"
+	@echo "release           release build + $(RELEASE_IMAGE) image, nothing is published"
+	@echo "dev-up/dev-down/dev-logs  manage the rustinx-dev Compose project"
+
+build:
+	cargo build --release --locked
+	docker build -t $(DEV_IMAGE) .
+
+test: test-unit test-integration
+
+test-unit:
+	cargo test --locked --lib --bins
+
+test-integration: test-host test-docker
+
+test-host:
+	cargo test --locked --test supervisor
+
+test-docker:
+	scripts/docker-integration.sh
+
+test-e2e:
+	@echo "test-e2e: no end-to-end suite exists yet; ACME end-to-end tests start in Phase 2." >&2
+	@exit 1
+
+test-clean:
+	scripts/test-clean.sh
+
+lint:
+	cargo fmt --check
+	cargo clippy --all-targets --locked -- -D warnings
+	for script in $(SCRIPTS); do bash -n "$$script"; done
+	@if command -v shellcheck >/dev/null; then shellcheck -x $(SCRIPTS); \
+	else echo "lint: SKIPPED shellcheck (not installed)"; fi
+	@if command -v hadolint >/dev/null; then hadolint Dockerfile; \
+	else echo "lint: SKIPPED hadolint (not installed)"; fi
+
+security:
+	@command -v cargo-audit >/dev/null || { echo "security: cargo-audit is not installed (cargo install --locked cargo-audit)" >&2; exit 1; }
+	cargo audit
+
+cache-clean:
+	@echo "cache-clean removes ONLY project-owned caches:"
+	@echo "  - ./target (Cargo build output and test-run logs of this checkout)"
+	@echo "It keeps ~/.cargo, Docker images and the shared Docker build cache."
+	@if [ "$(CONFIRM)" != "yes" ]; then echo "Re-run with CONFIRM=yes to proceed." >&2; exit 1; fi
+	@if [ -d target/test-runs ] && find target/test-runs -mindepth 1 -maxdepth 1 -type d \
+		-exec test ! -e '{}/cleanup.done' ';' -print | grep -q .; then \
+		echo "cache-clean: some test runs were not cleaned up; run 'make test-clean' first." >&2; exit 1; fi
+	cargo clean
+
+release:
+	cargo build --release --locked
+	docker build -t $(RELEASE_IMAGE) .
+	@echo "release: built $(RELEASE_IMAGE) locally; nothing was pushed or published."
+
+dev-up:
+	$(DEV_COMPOSE) up -d --build --wait
+
+dev-down:
+	$(DEV_COMPOSE) down
+
+dev-logs:
+	$(DEV_COMPOSE) logs -f
