@@ -214,13 +214,16 @@ expect "sigint: state persisted (start count 3)" "$(start_count)" "3"
 # --- Health check reflects a stalled nginx -----------------------------------------------------
 log "scenario: stalled nginx makes the container unhealthy"
 master="$(in_container cat /run/rustinx/nginx.pid)"
+# shellcheck disable=SC2016 # $1 is expanded by the shell inside the container.
 in_container sh -c 'kill -s STOP -- "-$1"' sh "$master"
 if wait_health "$app" unhealthy; then pass "health: stalled nginx reported unhealthy"; else fail "health: stalled nginx reported unhealthy" "$(health "$app")"; fi
+# shellcheck disable=SC2016 # $1 is expanded by the shell inside the container.
 in_container sh -c 'kill -s CONT -- "-$1"' sh "$master"
 if wait_health "$app" healthy; then pass "health: recovered nginx reported healthy"; else fail "health: recovered nginx reported healthy" "$(health "$app")"; fi
 
 # --- Unexpected nginx termination ------------------------------------------------------------
 log "scenario: nginx master killed"
+# shellcheck disable=SC2016
 in_container sh -c 'kill -s KILL "$1"' sh "$master" || true
 if wait_exited "$app"; then pass "crash: container exited"; else fail "crash: container exited" "still running"; fi
 expect "crash: exit code 3" "$(inspect '{{.State.ExitCode}}' "$app")" "3"

@@ -33,6 +33,17 @@ resource_label() {
     docker "$1" inspect --format "$format" "$2" 2>/dev/null
 }
 
+# remove_resource KIND ID
+remove_resource() {
+    case "$1" in
+        container) docker rm -f "$2" >/dev/null ;;
+        network) docker network rm "$2" >/dev/null ;;
+        volume) docker volume rm "$2" >/dev/null ;;
+        image) docker image rm "$2" >/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
 # remaining_resources RUN_ID: lists resources still carrying the run label.
 remaining_resources() {
     local filter=(--filter "label=$RUN_LABEL=$1")
@@ -59,15 +70,12 @@ cleanup_manifest() {
                 failures=$((failures + 1))
                 continue
             fi
-            case "$kind" in
-                container) docker rm -f "$id" >/dev/null ;;
-                network) docker network rm "$id" >/dev/null ;;
-                volume) docker volume rm "$id" >/dev/null ;;
-                image) docker image rm "$id" >/dev/null ;;
-            esac && echo "cleanup: removed $kind $id" || {
+            if remove_resource "$kind" "$id"; then
+                echo "cleanup: removed $kind $id"
+            else
                 echo "cleanup: FAILED to remove $kind $id"
                 failures=$((failures + 1))
-            }
+            fi
         done < "$manifest"
     done
     local remaining

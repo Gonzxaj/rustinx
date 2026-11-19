@@ -8,10 +8,17 @@ VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
 DEV_IMAGE := rustinx:dev
 RELEASE_IMAGE := rustinx:$(VERSION)
 DEV_COMPOSE := docker compose -p rustinx-dev -f docker-compose.yml
+# Linters and dependency checkers run in throwaway containers; nothing is installed on the host.
+SHELLCHECK_IMAGE := koalaman/shellcheck:v0.10.0
+HADOLINT_IMAGE := hadolint/hadolint:v2.12.0
+CARGO_AUDIT_VERSION := 0.23.0
+CARGO_DENY_VERSION := 0.21.0
+TOOLS_IMAGE := rustinx-tools:audit-$(CARGO_AUDIT_VERSION)-deny-$(CARGO_DENY_VERSION)
+DOCKER_TOOL := docker run --rm --label rustinx.tools=1
 SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh tests/fixtures/*.sh)
 
 .PHONY: help build test test-unit test-integration test-host test-docker test-e2e test-clean \
-	lint security cache-clean release dev-up dev-down dev-logs
+	lint security tools-image cache-clean release dev-up dev-down dev-logs
 
 help:
 	@echo "build             cargo release build + $(DEV_IMAGE) image"
@@ -20,8 +27,8 @@ help:
 	@echo "test-integration  host integration tests (fake nginx) + Docker integration tests (real nginx)"
 	@echo "test-e2e          end-to-end ACME tests (not available until Phase 2)"
 	@echo "test-clean        remove leftover resources of interrupted test runs (run-scoped only)"
-	@echo "lint              rustfmt, clippy, shell syntax (+ shellcheck/hadolint if installed)"
-	@echo "security          cargo audit (requires cargo-audit)"
+	@echo "lint              rustfmt, clippy, shell syntax, shellcheck and hadolint (in Docker)"
+	@echo "security          cargo audit + cargo deny (in a local tools image)"
 	@echo "cache-clean       remove project-owned caches (requires CONFIRM=yes)"
 	@echo "release           release build + $(RELEASE_IMAGE) image, nothing is published"
 	@echo "dev-up/dev-down/dev-logs  manage the rustinx-dev Compose project"
@@ -54,14 +61,17 @@ lint:
 	cargo fmt --check
 	cargo clippy --all-targets --locked -- -D warnings
 	for script in $(SCRIPTS); do bash -n "$$script"; done
-	@if command -v shellcheck >/dev/null; then shellcheck -x $(SCRIPTS); \
-	else echo "lint: SKIPPED shellcheck (not installed)"; fi
-	@if command -v hadolint >/dev/null; then hadolint Dockerfile; \
-	else echo "lint: SKIPPED hadolint (not installed)"; fi
+	$(DOCKER_TOOL) -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) -x $(SCRIPTS)
+	for file in Dockerfile docker/tools.Dockerfile; do $(DOCKER_TOOL) -i $(HADOLINT_IMAGE) hadolint - < "$$file"; done
 
-security:
-	@command -v cargo-audit >/dev/null || { echo "security: cargo-audit is not installed (cargo install --locked cargo-audit)" >&2; exit 1; }
-	cargo audit
+security: tools-image
+	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo audit --deny warnings
+	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo deny --locked check
+
+tools-image:
+	docker build --label rustinx.tools=$(TOOLS_IMAGE) \
+		--build-arg CARGO_AUDIT_VERSION=$(CARGO_AUDIT_VERSION) --build-arg CARGO_DENY_VERSION=$(CARGO_DENY_VERSION) \
+		-t $(TOOLS_IMAGE) -f docker/tools.Dockerfile docker
 
 cache-clean:
 	@echo "cache-clean removes ONLY project-owned caches:"

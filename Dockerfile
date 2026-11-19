@@ -3,6 +3,8 @@
 ARG RUST_IMAGE=rust:1.99.1-slim-trixie
 ARG NGINX_IMAGE=nginx:1.30-trixie
 
+# Base images are pinned through the ARGs above.
+# hadolint ignore=DL3006
 FROM ${RUST_IMAGE} AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -14,12 +16,15 @@ RUN --mount=type=cache,id=rustinx-cargo-registry,target=/usr/local/cargo/registr
     cargo build --release --locked \
     && install -m 0755 target/release/rustinx /usr/local/bin/rustinx
 
+# hadolint ignore=DL3006
 FROM ${NGINX_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="rustinx" \
       org.opencontainers.image.description="Nginx supervised by a Rust manager"
 
 # tini runs as PID 1 and reaps zombies; rustinx supervises Nginx.
+# tini comes from the pinned Debian release; its security updates are wanted, not a fixed version.
+# hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/* \
