@@ -700,6 +700,68 @@ A run is not considered successful if required cleanup failed.
 - [ ] No secrets committed.
 - [ ] Release publication explicitly authorized.
 
+## 16. Implemented tests and results
+
+### Phase 1 suites
+
+| Suite | Command | Location | What it uses |
+|---|---|---|---|
+| Unit | `make test-unit` | `src/*.rs` (`#[cfg(test)]`) | temp dirs, local TCP listeners |
+| Host integration | `make test-host` | `tests/supervisor.rs` | real `rustinx` binary + `tests/fixtures/fake-nginx.sh`, temp dirs |
+| Docker integration | `make test-docker` | `scripts/docker-integration.sh`, `tests/docker/compose.yaml` | real image with real Nginx |
+
+Unit tests (24): configuration defaults/overrides/validation (relative paths, non-loopback health
+address, timeouts), log format parsing, health probe (200, 500, refused, timeout), storage layout,
+permissions, symlink rejection, atomic state, corrupt state preservation, future schema refusal,
+explicit Nginx arguments, missing Nginx binary.
+
+Host integration tests (12): SIGTERM and SIGINT graceful stop, invalid Nginx configuration
+(exit 2), Nginx exiting during startup (exit 3), unexpected Nginx exit with an orphaned worker
+that must be killed (exit 3), never healthy (exit 3), shutdown timeout escalating to SIGKILL,
+persistence across restarts, missing data directory, invalid environment, `healthcheck` command.
+
+Docker integration checks (40): build; startup and container health; test page served; health
+endpoint not published; process tree (tini PID 1, one Nginx master, workers); uid 101, read-only
+rootfs, `cap_drop ALL`; `/data` named volume, layout and start count; SIGTERM via `docker stop`
+(exit 0, before the grace period, graceful SIGQUIT); container restart with persisted state;
+SIGINT; stalled Nginx (SIGSTOP) reported unhealthy and recovered; Nginx master killed (exit 3,
+leftover workers killed); container recreation keeps the volume; invalid user configuration
+(exit 2, `nginx -t` error logged, never healthy); user configuration unchanged.
+
+### Docker test isolation
+
+- Run id `<UTC timestamp>-<random hex>`; Compose project `rustinx-test-<run-id>`; image
+  `rustinx:test-<run-id>`.
+- Every container, network, volume and image carries the label `rustinx.test-run=<run-id>`.
+- Created resources are recorded in `target/test-runs/<run-id>/resources.manifest`.
+- The host port is ephemeral and bound to `127.0.0.1`.
+- On exit (success, failure, SIGINT/SIGTERM) logs are collected into
+  `target/test-runs/<run-id>/logs/` (build, compose, per-container logs and inspect output),
+  then cleanup removes only manifest entries whose label matches the run id, in the order
+  containers → networks → volumes → images, and verifies that nothing labelled remains.
+  Cleanup failures make the run fail. `cleanup.done` marks a cleaned run.
+- `make test-clean` cleans runs without `cleanup.done` (e.g. a run killed with SIGKILL).
+- No prune command and no `docker compose down -v` is used. The Cargo registry/target cache
+  mounts and the Docker build cache are preserved.
+
+### Results (2026-11-19, local Docker 29.8.2 rootless, linux/amd64)
+
+| Check | Result |
+|---|---|
+| `make lint` | passed (rustfmt, clippy `-D warnings`, `bash -n`); shellcheck, hadolint SKIPPED (not installed) |
+| `make test-unit` | 24 passed, 0 failed |
+| `make test-host` | 12 passed, 0 failed (3 consecutive runs) |
+| `make test-docker` | 40 passed, 0 failed (3 consecutive runs), cleanup success |
+| Interrupted run (script SIGKILLed) + `make test-clean` | all recorded resources removed, nothing labelled left |
+| `make build`, `make release` | passed (`rustinx:dev`, `rustinx:0.1.0`, about 244 MB) |
+| `make dev-up` / `make dev-down` | container healthy, test page served on `127.0.0.1:18080` |
+| `make security` | NOT RUN: `cargo-audit` not installed (target fails explicitly) |
+| `make test-e2e` | NOT AVAILABLE: no ACME suite before Phase 2 (target fails explicitly) |
+
+Issues found and fixed while testing: a host test expecting a startup-exit message while the
+health endpoint was healthy; ANSI colour codes in container logs; Nginx workers surviving a
+killed master; a false negative in log assertions (`grep -q` + `pipefail` SIGPIPE).
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.
