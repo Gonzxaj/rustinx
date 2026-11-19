@@ -748,19 +748,20 @@ leftover workers killed); container recreation keeps the volume; invalid user co
 
 | Check | Result |
 |---|---|
-| `make lint` | passed (rustfmt, clippy `-D warnings`, `bash -n`); shellcheck, hadolint SKIPPED (not installed) |
+| `make lint` | passed (rustfmt, clippy `-D warnings`, `bash -n`, shellcheck, hadolint in Docker) |
 | `make test-unit` | 24 passed, 0 failed |
 | `make test-host` | 12 passed, 0 failed (3 consecutive runs) |
 | `make test-docker` | 40 passed, 0 failed (3 consecutive runs), cleanup success |
 | Interrupted run (script SIGKILLed) + `make test-clean` | all recorded resources removed, nothing labelled left |
 | `make build`, `make release` | passed (`rustinx:dev`, `rustinx:0.1.0`, about 244 MB) |
 | `make dev-up` / `make dev-down` | container healthy, test page served on `127.0.0.1:18080` |
-| `make security` | NOT RUN: `cargo-audit` not installed (target fails explicitly) |
+| `make security` | passed: cargo audit (58 crates, no advisories), cargo deny (advisories, bans, licenses, sources ok; duplicate `syn` 2/3 warning) |
 | `make test-e2e` | NOT AVAILABLE: no ACME suite before Phase 2 (target fails explicitly) |
 
 Issues found and fixed while testing: a host test expecting a startup-exit message while the
 health endpoint was healthy; ANSI colour codes in container logs; Nginx workers surviving a
-killed master; a false negative in log assertions (`grep -q` + `pipefail` SIGPIPE).
+killed master; a false negative in log assertions (`grep -q` + `pipefail` SIGPIPE); shellcheck
+SC2015 in the cleanup helper.
 
 ## 15. Final rule
 

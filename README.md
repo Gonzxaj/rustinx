@@ -94,8 +94,8 @@ State files are written atomically. A corrupt `runtime.json` is preserved as
 | `make test-unit` / `make test-integration` | Subsets (`test-host`, `test-docker`) |
 | `make test-e2e` | Fails explicitly: no end-to-end ACME suite until Phase 2 |
 | `make test-clean` | Removes leftovers of interrupted test runs (run-scoped only) |
-| `make lint` | rustfmt, clippy `-D warnings`, shell syntax; shellcheck/hadolint if installed |
-| `make security` | `cargo audit` (requires `cargo-audit`) |
+| `make lint` | rustfmt, clippy `-D warnings`, shell syntax, shellcheck and hadolint (run in Docker) |
+| `make security` | `cargo audit` and `cargo deny check` in a local `rustinx-tools` image |
 | `make cache-clean CONFIRM=yes` | Removes `./target` only |
 | `make release` | Builds `rustinx:<version>` locally; nothing is pushed |
 
