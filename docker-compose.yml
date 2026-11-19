@@ -1,0 +1,33 @@
+# Isolated development environment. Project name, volume and network are dedicated to rustinx.
+# Start: make dev-up    Stop: make dev-down (keeps the data volume)
+name: rustinx-dev
+
+services:
+  rustinx:
+    build:
+      context: .
+    image: rustinx:dev
+    restart: unless-stopped
+    ports:
+      # Loopback only. Override the host port with RUSTINX_DEV_HTTP_PORT if 18080 is in use.
+      - "127.0.0.1:${RUSTINX_DEV_HTTP_PORT:-18080}:80"
+    environment:
+      RUSTINX_LOG: ${RUSTINX_LOG:-info}
+      RUSTINX_LOG_FORMAT: ${RUSTINX_LOG_FORMAT:-text}
+    volumes:
+      - data:/data
+      - ./config/nginx:/etc/nginx/user_conf.d:ro
+    read_only: true
+    tmpfs:
+      - /run/rustinx:uid=101,gid=101,mode=0700,size=1m
+      - /var/cache/rustinx:uid=101,gid=101,mode=0700,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    stop_grace_period: 15s
+
+volumes:
+  data:
