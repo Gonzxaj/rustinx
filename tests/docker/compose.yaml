@@ -1,0 +1,71 @@
+# Compose project used only by scripts/docker-integration.sh. The script sets a unique
+# project name per run (rustinx-test-<run-id>); every resource carries the run label.
+services:
+  rustinx:
+    image: ${RUSTINX_TEST_IMAGE:?}
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+    restart: "no"
+    ports:
+      # Ephemeral loopback port: never collides with existing services.
+      - "127.0.0.1::80"
+    environment:
+      RUSTINX_LOG: debug
+    volumes:
+      - data:/data
+      - ${RUSTINX_TEST_USER_CONF:?}:/etc/nginx/user_conf.d:ro
+    read_only: true
+    tmpfs:
+      - /run/rustinx:uid=101,gid=101,mode=0700,size=1m
+      - /var/cache/rustinx:uid=101,gid=101,mode=0700,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rustinx", "healthcheck"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 15s
+
+  badconf:
+    profiles: ["badconf"]
+    image: ${RUSTINX_TEST_IMAGE:?}
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+    restart: "no"
+    volumes:
+      - badconf-data:/data
+      - ${RUSTINX_TEST_BAD_CONF:?}:/etc/nginx/user_conf.d:ro
+    read_only: true
+    tmpfs:
+      - /run/rustinx:uid=101,gid=101,mode=0700,size=1m
+      - /var/cache/rustinx:uid=101,gid=101,mode=0700,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rustinx", "healthcheck"]
+      interval: 1s
+      timeout: 3s
+      retries: 3
+
+networks:
+  default:
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+
+volumes:
+  data:
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+  badconf-data:
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
