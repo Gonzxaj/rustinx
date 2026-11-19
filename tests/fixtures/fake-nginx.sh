@@ -20,7 +20,8 @@ echo "$$" > "$dir/pid"
 
 case "$mode" in
     exit-on-start) exit 1 ;;
-    crash-after-start) sleep 1; exit 7 ;;
+    # Leaves a "worker" behind, like an nginx master killed with SIGKILL.
+    crash-after-start) sleep 60 & echo "$!" > "$dir/worker"; sleep 1; exit 7 ;;
 esac
 
 if [ "$mode" = "ignore-quit" ]; then

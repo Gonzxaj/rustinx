@@ -1,5 +1,7 @@
 //! Structured logging to stderr, so container runtimes collect it.
 
+use std::io::IsTerminal;
+
 use tracing_subscriber::EnvFilter;
 
 pub const ENV_LOG: &str = "RUSTINX_LOG";
@@ -34,7 +36,8 @@ pub fn init() -> Result<(), String> {
     };
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr);
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal());
     let result = match format {
         LogFormat::Text => builder.try_init(),
         LogFormat::Json => builder.json().flatten_event(true).try_init(),

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use nix::sys::signal::{Signal, kill};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use thiserror::Error;
 use tokio::process::{Child, Command};
@@ -99,13 +99,19 @@ impl Nginx {
                 bin: self.bin.clone(),
                 source,
             })?;
-        Ok(NginxProcess { child })
+        let pgid = child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .map(Pid::from_raw);
+        Ok(NginxProcess { child, pgid })
     }
 }
 
 #[derive(Debug)]
 pub struct NginxProcess {
     child: Child,
+    /// The master leads its own process group, so its PID is also the group id.
+    pgid: Option<Pid>,
 }
 
 impl NginxProcess {
@@ -134,6 +140,19 @@ impl NginxProcess {
     /// Sends SIGKILL and reaps the process.
     pub async fn kill(&mut self) -> io::Result<()> {
         self.child.kill().await
+    }
+
+    /// SIGKILLs processes still in the Nginx process group, e.g. workers orphaned by a master
+    /// crash. Call only after the master was reaped. Returns `Ok(false)` if the group is empty.
+    pub fn kill_group(&self) -> io::Result<bool> {
+        let Some(pgid) = self.pgid else {
+            return Ok(false);
+        };
+        match killpg(pgid, Signal::SIGKILL) {
+            Ok(()) => Ok(true),
+            Err(nix::errno::Errno::ESRCH) => Ok(false),
+            Err(errno) => Err(io::Error::from(errno)),
+        }
     }
 }
 

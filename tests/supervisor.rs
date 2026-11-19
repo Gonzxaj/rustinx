@@ -225,6 +225,19 @@ fn unexpected_nginx_exit_is_detected() {
 
     assert_eq!(status.code(), Some(3), "log:\n{}", harness.log());
     assert!(harness.log().contains("nginx exited unexpectedly"));
+
+    let worker = Pid::from_raw(harness.read_fake("worker").unwrap().parse().unwrap());
+    assert!(
+        harness
+            .log()
+            .contains("killed processes left in the nginx process group")
+    );
+    // The orphan is reaped asynchronously by the host's init process.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while is_alive(worker) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!is_alive(worker), "orphaned worker {worker} survived");
 }
 
 #[test]

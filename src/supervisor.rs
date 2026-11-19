@@ -97,7 +97,11 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
     );
 
     tokio::select! {
-        status = process.wait() => Err(SupervisorError::UnexpectedExit(status?)),
+        status = process.wait() => {
+            let status = status?;
+            kill_leftovers(&process);
+            Err(SupervisorError::UnexpectedExit(status))
+        }
         _ = shutdown.cancelled() => {
             stop(&mut process, config.shutdown_timeout).await?;
             Ok(())
@@ -133,7 +137,17 @@ async fn stop(process: &mut NginxProcess, timeout: Duration) -> Result<(), Super
             info!(pid, "nginx killed");
         }
     }
+    kill_leftovers(process);
     Ok(())
+}
+
+/// Ensures no Nginx process outlives its master.
+fn kill_leftovers(process: &NginxProcess) {
+    match process.kill_group() {
+        Ok(true) => warn!("killed processes left in the nginx process group"),
+        Ok(false) => {}
+        Err(err) => warn!(error = %err, "failed to kill the nginx process group"),
+    }
 }
 
 fn unix_now() -> u64 {
