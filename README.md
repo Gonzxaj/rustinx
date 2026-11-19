@@ -100,3 +100,7 @@ State files are written atomically. A corrupt `runtime.json` is preserved as
 | `make release` | Builds `rustinx:<version>` locally; nothing is pushed |
 
 See `TESTING.md` for the test isolation and cleanup rules.
+
+## License
+
+MIT. See `LICENSE`.

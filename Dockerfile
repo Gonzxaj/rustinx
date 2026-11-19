@@ -39,6 +39,9 @@ COPY docker/html/ /usr/share/rustinx/html/
 
 # Unprivileged user of the base image (uid/gid 101). Binding ports 80/443 relies on
 # net.ipv4.ip_unprivileged_port_start=0, which Docker sets by default for bridge networks.
+LABEL org.opencontainers.image.title="rustinx" \
+      org.opencontainers.image.licenses="MIT"
+
 USER 101:101
 
 EXPOSE 80 443

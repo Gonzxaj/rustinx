@@ -7,10 +7,6 @@ yanked = "deny"
 allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
 confidence-threshold = 0.9
 
-# rustinx itself is `publish = false` and has no license chosen yet.
-[licenses.private]
-ignore = true
-
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

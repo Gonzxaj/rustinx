@@ -3,7 +3,7 @@ name = "rustinx"
 version = "0.1.0"
 edition = "2024"
 description = "Nginx supervised by a Rust manager, with automatic certificate management planned"
-license = "UNLICENSED"
+license = "MIT"
 publish = false
 
 [dependencies]
