@@ -1,0 +1,8 @@
+/target/
+*.swp
+*~
+.env
+.env.*
+!.env.example
+*.pem
+*.key
