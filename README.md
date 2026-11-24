@@ -124,8 +124,8 @@ reach Nginx on port 80. The HTTP-01 challenge remains the default per certificat
    is excluded from Git and the Docker build context. This token is separate from the
    Cloudflare Tunnel token. Compose mounts it at `/run/secrets/cloudflare_dns_token`.
 3. Copy `config/certificates.dns.example.toml` to `certificates.toml`, enter the Zone ID and
-   use the requested names in `domains`. The example requests the dedicated test hostname
-   and its wildcard using Let's Encrypt Staging. Each DNS certificate uses
+   replace the sample names in `domains` with your test hostname and its wildcard. The
+   template uses Let's Encrypt Staging. Each DNS certificate uses
    `challenge = "dns-01"`.
 
 ```bash

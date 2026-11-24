@@ -7,3 +7,5 @@ target/
 
 .rustinx-data/
 .rustinx-secrets/
+
+**/certificates.toml
