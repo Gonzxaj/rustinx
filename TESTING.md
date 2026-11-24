@@ -871,6 +871,24 @@ The Alpine container passed all 40 real-Nginx integration checks and the Pebble 
 suite. Run the shell-based supervisor fixture in the GNU Rust image, where the test shell
 handles its SIGQUIT trap. Test signals against real Nginx in the Alpine image.
 
+### Phase 7 CI and release checks
+
+On 2026-11-24, the local AMD64 `make ci` run passed 49 unit tests, 12 supervisor
+tests, 40 Docker integration checks, the Pebble end-to-end suite and the security
+checks. The GitHub Actions workflow passed actionlint. The shell-based Nginx fixture
+now signals when its handlers are ready, removing a race found by the first CI run.
+
+`make release` was tested with a disposable local tag. The release image reported
+`rustinx 0.1.0` and carried the corresponding OCI version and revision labels. The
+OCI verifier rejects an archive missing ARM64 or carrying an incorrectly labeled
+executable.
+
+The final release used a native compiler inside Docker to cross-compile Rust for musl.
+BuildKit executed `rustinx version` in both the AMD64 and emulated ARM64 runtime images.
+The local OCI archive passed checks for both ELF architectures, blob digests, and
+version and revision labels. The updated AMD64 image passed the Nginx and Pebble
+suites and the Trivy gate again.
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.

@@ -31,6 +31,7 @@ else
 fi
 trap 'echo term > "$dir/signal"; exit 0' TERM
 trap 'echo int > "$dir/signal"; exit 0' INT
+: > "$dir/ready"
 
 while :; do
     sleep 1 &

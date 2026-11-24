@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Tests and security (AMD64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run local CI target
+        run: make ci
+
+  arm64:
+    name: Nginx integration and image scan (ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify ARM64 runtime and scan the image
+        run: make test-docker image-security
+
+  release-index:
+    name: Validate the local multi-architecture OCI index
+    runs-on: ubuntu-24.04
+    needs: [checks, arm64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and check OCI archive
+        run: |
+          docker buildx create --driver docker-container --name rustinx-ci
+          trap 'docker buildx rm rustinx-ci' EXIT
+          BUILDX_BUILDER=rustinx-ci make release-oci

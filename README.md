@@ -342,6 +342,38 @@ container UID before running the restore. Keep the previous volume until verific
 | 2 | Invalid configuration (environment, logging settings or `nginx -t`) |
 | 3 | Nginx exited during startup, never became healthy, or exited unexpectedly |
 
+## CI and local releases
+
+Run `make ci` to run the formatting, linting, Rust tests, Docker integration tests,
+ACME end-to-end tests and security checks without installing the Rust toolchain on the
+host. The GitHub Actions workflow uses that target on AMD64, exercises real Nginx and
+scans the image on a native ARM64 runner, then validates a two-platform OCI archive.
+
+Use the SemVer value in `Cargo.toml` as the release version. Update it and the Rustinx
+entry in `Cargo.lock` together, and move the relevant entries in `CHANGELOG.md` into the
+new version section. Run `make ci` from the release commit before building:
+
+```bash
+make release
+docker buildx create --name rustinx-release --driver docker-container
+BUILDX_BUILDER=rustinx-release make release-oci
+docker buildx rm rustinx-release
+```
+
+`make release` loads `rustinx:<version>` into the local Docker engine. Build metadata uses
+`_` in the Docker tag and keeps its original `+` in the version label. `make release-oci`
+writes `target/release/rustinx-<version>.oci.tar` after verifying both Linux platforms,
+the executable architectures, the blob checksums, and the version and revision labels.
+The verifier uses Python 3.11 or newer. Rust compiles on the builder's native CPU
+for the target musl architecture. Buildx still needs to execute the Alpine runtime
+steps for both architectures, using its bundled emulation or native nodes.
+
+The Dockerfile pins the base image indexes and Cargo uses the lockfile. Alpine packages
+are refreshed from the package repository at build time so security fixes are included.
+A later build of the same Git revision can therefore have different image bytes. A
+working tree with local changes is labeled `-dirty`. The release targets and workflow
+keep their images and archives local to Docker or to the CI runner.
+
 ## Make targets
 
 | Target | Description |
@@ -355,7 +387,9 @@ container UID before running the restore. Keep the previous volume until verific
 | `make security` | `cargo audit` and `cargo deny check` in a local `rustinx-tools` image |
 | `make image-security` | Scan the local image with Trivy, report all severities, fail on high or critical findings, and write a CycloneDX SBOM under `target/security/` |
 | `make cache-clean CONFIRM=yes` | Removes `./target` only |
-| `make release` | Builds `rustinx:<version>` locally; nothing is pushed |
+| `make ci` | Run code, Docker and security checks |
+| `make release` | Build the versioned image in the local Docker engine |
+| `make release-oci` | Build and verify a local AMD64/ARM64 OCI archive |
 
 See `TESTING.md` for the test isolation and cleanup rules.
 

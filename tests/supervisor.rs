@@ -81,6 +81,11 @@ impl Harness {
     }
 
     fn spawn(&self, mode: &str) -> Child {
+        match fs::remove_file(self.fake("ready")) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("could not reset fake nginx readiness: {err}"),
+        }
         let log = File::create(self.path("rustinx.log")).unwrap();
         self.command(mode)
             .stdout(log.try_clone().unwrap())
@@ -106,6 +111,21 @@ impl Harness {
                 .parse()
                 .unwrap(),
         )
+    }
+
+    fn wait_for_ready(&self) {
+        self.wait_for_log("nginx is healthy");
+        // The test health server is independent of the fake subprocess. Wait
+        // for its signal handlers before asking the supervisor to shut down.
+        let deadline = Instant::now() + WAIT;
+        while !self.fake("ready").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "fake nginx did not become ready: {}",
+                self.log()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn wait_for_log(&self, needle: &str) {
@@ -146,7 +166,7 @@ fn is_alive(pid: Pid) -> bool {
 fn assert_graceful_stop(signal_to_send: Signal) {
     let harness = Harness::healthy();
     let mut child = harness.spawn("normal");
-    harness.wait_for_log("nginx is healthy");
+    harness.wait_for_ready();
     let nginx = harness.nginx_pid();
     assert!(is_alive(nginx));
 
@@ -179,7 +199,7 @@ fn sigint_stops_nginx_gracefully() {
 fn nginx_is_tested_then_started_with_explicit_arguments() {
     let harness = Harness::healthy();
     let mut child = harness.spawn("normal");
-    harness.wait_for_log("nginx is healthy");
+    harness.wait_for_ready();
     signal(&child, Signal::SIGTERM);
     harness.wait_exit(&mut child);
 
@@ -256,7 +276,7 @@ fn nginx_that_never_becomes_healthy_is_stopped() {
 fn shutdown_timeout_escalates_to_sigkill() {
     let harness = Harness::healthy();
     let mut child = harness.spawn("ignore-quit");
-    harness.wait_for_log("nginx is healthy");
+    harness.wait_for_ready();
     let nginx = harness.nginx_pid();
 
     let started = Instant::now();
@@ -278,7 +298,7 @@ fn runtime_state_persists_across_restarts() {
     let harness = Harness::healthy();
     for expected_count in 1..=2u64 {
         let mut child = harness.spawn("normal");
-        harness.wait_for_log("nginx is healthy");
+        harness.wait_for_ready();
         signal(&child, Signal::SIGTERM);
         assert_eq!(harness.wait_exit(&mut child).code(), Some(0));
 

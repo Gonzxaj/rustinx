@@ -6,7 +6,12 @@ SHELL := /usr/bin/env bash
 
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
 DEV_IMAGE := rustinx:dev
-RELEASE_IMAGE := rustinx:$(VERSION)
+RELEASE_TAG := $(subst +,_,$(VERSION))
+RELEASE_IMAGE := rustinx:$(RELEASE_TAG)
+RELEASE_ARCHIVE := target/release/rustinx-$(VERSION).oci.tar
+REVISION := $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)$(shell test -z "$$(git status --porcelain 2>/dev/null)" || echo -dirty)
+CI_RUST_IMAGE := rust:1.99.1-trixie
+RELEASE_ARGS := --build-arg BUILD_VERSION=$(VERSION) --build-arg BUILD_REVISION=$(REVISION)
 DEV_COMPOSE := docker compose -p rustinx-dev -f docker-compose.yml
 # Linters and dependency checkers run in throwaway containers; nothing is installed on the host.
 SHELLCHECK_IMAGE := koalaman/shellcheck:v0.10.0
@@ -21,7 +26,7 @@ DOCKER_TOOL := docker run --rm --label rustinx.tools=1
 SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh tests/fixtures/*.sh)
 
 .PHONY: help build test test-unit test-integration test-host test-docker test-e2e test-clean \
-	lint security image-security tools-image cache-clean release dev-up dev-down dev-logs
+	lint ci security image-security tools-image cache-clean release release-oci dev-up dev-down dev-logs
 
 help:
 	@echo "build             cargo release build + $(DEV_IMAGE) image"
@@ -31,10 +36,12 @@ help:
 	@echo "test-e2e          end-to-end ACME HTTP-01 tests in Docker with Pebble"
 	@echo "test-clean        remove leftover resources of interrupted test runs (run-scoped only)"
 	@echo "lint              rustfmt, clippy, shell syntax, shellcheck and hadolint (in Docker)"
+	@echo "ci                format, lint, test and audit in Docker"
 	@echo "security          cargo audit + cargo deny (in a local tools image)"
 	@echo "image-security    scan a local image and generate an SBOM in target/security"
 	@echo "cache-clean       remove project-owned caches (requires CONFIRM=yes)"
-	@echo "release           release build + $(RELEASE_IMAGE) image, nothing is published"
+	@echo "release           build $(RELEASE_IMAGE) locally with OCI metadata"
+	@echo "release-oci       export and validate a local AMD64/ARM64 OCI archive"
 	@echo "dev-up/dev-down/dev-logs  manage the rustinx-dev Compose project"
 
 build:
@@ -67,6 +74,16 @@ lint:
 	$(DOCKER_TOOL) -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) -x $(SCRIPTS)
 	for file in Dockerfile docker/tools.Dockerfile; do $(DOCKER_TOOL) -i $(HADOLINT_IMAGE) hadolint - < "$$file"; done
 
+ci:
+	$(DOCKER_TOOL) --init -v "$(CURDIR):/src:ro" -w /src -e CARGO_TARGET_DIR=/tmp/rustinx-target \
+		$(CI_RUST_IMAGE) bash -ec 'rustup component add rustfmt clippy && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked'
+	$(DOCKER_TOOL) -v "$(CURDIR):/mnt:ro" -w /mnt $(SHELLCHECK_IMAGE) -x $(SCRIPTS)
+	$(DOCKER_TOOL) -i $(HADOLINT_IMAGE) hadolint - < Dockerfile
+	$(MAKE) security
+	$(MAKE) test-docker
+	$(MAKE) test-e2e
+	$(MAKE) image-security
+
 security: tools-image
 	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo audit --deny warnings
 	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo deny --locked check
@@ -98,9 +115,18 @@ cache-clean:
 	cargo clean
 
 release:
-	cargo build --release --locked
-	docker build -t $(RELEASE_IMAGE) .
-	@echo "release: built $(RELEASE_IMAGE) locally; nothing was pushed or published."
+	docker build --pull $(RELEASE_ARGS) -t $(RELEASE_IMAGE) .
+	@echo "release: built $(RELEASE_IMAGE) locally"
+
+release-oci:
+	mkdir -p "$(dir $(RELEASE_ARCHIVE))"
+	@archive="$$(mktemp "$(RELEASE_ARCHIVE).XXXXXXXX")"; \
+	trap 'rm -f "$$archive"' EXIT; \
+	docker buildx build --pull --platform linux/amd64,linux/arm64 --provenance=false \
+		$(RELEASE_ARGS) -t $(RELEASE_IMAGE) --output "type=oci,dest=$$archive" .; \
+	python3 scripts/verify-oci.py "$$archive" "$(VERSION)" "$(REVISION)"; \
+	mv "$$archive" "$(RELEASE_ARCHIVE)"
+	@echo "release: saved $(RELEASE_ARCHIVE) locally"
 
 dev-up:
 	$(DEV_COMPOSE) up -d --build --wait
