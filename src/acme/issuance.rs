@@ -16,7 +16,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::cert_store::{CertStore, CertStoreError, CertificateMetadata, METADATA_SCHEMA_VERSION};
-use super::certificates::{AcmeSettings, CertificateRequest, CertificatesConfig};
+use super::certificates::{AcmeSettings, CertificateRequest, CertificatesConfig, Challenge};
+use super::cloudflare::{Cloudflare, DnsError};
 use crate::storage::{Storage, StorageError, write_atomic};
 
 #[derive(Debug, Error)]
@@ -37,8 +38,10 @@ pub enum IssueError {
     RateLimited(&'static str),
     #[error("ACME authorization is {0:?}")]
     Authorization(AuthorizationStatus),
-    #[error("ACME server did not offer HTTP-01")]
-    MissingChallenge,
+    #[error("ACME server did not offer {0:?}")]
+    MissingChallenge(ChallengeType),
+    #[error(transparent)]
+    Dns(#[from] DnsError),
     #[error("ACME server returned an invalid HTTP-01 token")]
     InvalidToken,
     #[error("ACME order is {0:?}")]
@@ -88,17 +91,29 @@ pub(crate) async fn issue_with_clock(
             source,
         })?;
 
+    let journal = storage.root().join("state/cloudflare-dns.json");
+    let mut dns = None;
     let store = CertStore::new(storage.root());
     let result = tokio::select! {
         biased;
         () = shutdown.cancelled() => Err(IssueError::Cancelled),
-        result = issue_all(config, &store, &challenges, renew_before_secs, now) => result,
+        result = issue_all(config, &store, &challenges, &journal, &mut dns, renew_before_secs, now) => result,
     };
     let cleanup = clear_challenges(&challenges);
     if let Err(err) = &cleanup {
         tracing::error!(target: "rustinx::acme", error = %err, "could not clean HTTP-01 responses");
     }
-    result.and(cleanup)
+    let dns_cleanup = match dns {
+        Some(mut provider) => tokio::time::timeout(Duration::from_secs(20), provider.cleanup())
+            .await
+            .map_err(|_| IssueError::Timeout)
+            .and_then(|result| result.map_err(IssueError::from)),
+        None => Ok(()),
+    };
+    if let Err(err) = &dns_cleanup {
+        tracing::error!(target: "rustinx::acme", error = %err, "DNS cleanup pending; the next run will retry");
+    }
+    result.and(cleanup).and(dns_cleanup)
 }
 
 pub(crate) fn lock_issuance(root: &Path) -> Result<File, IssueError> {
@@ -137,11 +152,19 @@ async fn issue_all(
     config: &CertificatesConfig,
     store: &CertStore,
     challenges: &Path,
+    journal: &Path,
+    dns: &mut Option<Cloudflare>,
     renew_before_secs: u64,
     now: impl Fn() -> SystemTime,
 ) -> Result<(), IssueError> {
     let settings = &config.acme;
     let mut account = None;
+    if journal.exists()
+        && let Some(settings) = &config.cloudflare
+    {
+        *dns = Some(Cloudflare::open(settings, journal.to_owned())?);
+        dns.as_mut().expect("provider initialized").cleanup().await?;
+    }
 
     for request in &config.certificates {
         let timestamp = i64::try_from(
@@ -168,6 +191,15 @@ async fn issue_all(
         if renew_before_secs > 0 {
             info!(target: "rustinx::acme", certificate = %request.id, "automatic certificate issuance due");
         }
+        let provider = if request.challenge == Challenge::Dns01 {
+            if dns.is_none() {
+                let settings = config.cloudflare.as_ref().ok_or(DnsError::Zone)?;
+                *dns = Some(Cloudflare::open(settings, journal.to_owned())?);
+            }
+            dns.as_mut()
+        } else {
+            None
+        };
         let account = match &account {
             Some(account) => account,
             None => account.insert(
@@ -178,7 +210,7 @@ async fn issue_all(
         };
         let (chain, key) = tokio::time::timeout(
             settings.challenge_timeout,
-            obtain(account, request, challenges, settings.challenge_timeout),
+            obtain(account, request, challenges, provider, settings.challenge_timeout),
         )
         .await
         .map_err(|_| IssueError::Timeout)??;
@@ -257,6 +289,7 @@ async fn obtain(
     account: &Account,
     request: &CertificateRequest,
     challenges: &Path,
+    mut dns: Option<&mut Cloudflare>,
     timeout: Duration,
 ) -> Result<(String, String), IssueError> {
     let identifiers: Vec<_> = request.domains.iter().cloned().map(Identifier::Dns).collect();
@@ -265,6 +298,10 @@ async fn obtain(
         "creating order",
     )?;
     let mut responses = ChallengeResponses::default();
+    let challenge_type = match request.challenge {
+        Challenge::Http01 => ChallengeType::Http01,
+        Challenge::Dns01 => ChallengeType::Dns01,
+    };
     let mut authorizations = order.authorizations();
     while let Some(result) = authorizations.next().await {
         let mut authorization = acme(result, "fetching authorization")?;
@@ -274,18 +311,36 @@ async fn obtain(
             status => return Err(IssueError::Authorization(status)),
         }
         let mut challenge = authorization
-            .challenge(ChallengeType::Http01)
-            .ok_or(IssueError::MissingChallenge)?;
-        responses.publish(
-            challenges,
-            &challenge.token,
-            challenge.key_authorization().as_str(),
-        )?;
+            .challenge(challenge_type.clone())
+            .ok_or_else(|| IssueError::MissingChallenge(challenge_type.clone()))?;
+        if let Some(provider) = dns.as_deref_mut() {
+            let identifier = challenge.identifier();
+            let Identifier::Dns(domain) = identifier.identifier else {
+                return Err(DnsError::Identifier.into());
+            };
+            if !request.domains.contains(&identifier.to_string()) {
+                return Err(DnsError::Identifier.into());
+            }
+            let name = format!("_acme-challenge.{domain}");
+            let digest = challenge.key_authorization().dns_value();
+            provider.publish(&name, &digest).await?;
+            provider.wait_visible(&name, &digest).await?;
+        } else {
+            responses.publish(
+                challenges,
+                &challenge.token,
+                challenge.key_authorization().as_str(),
+            )?;
+        }
         acme(challenge.set_ready().await, "submitting HTTP-01 response")?;
     }
 
     let retries = RetryPolicy::new().timeout(timeout);
-    let status = acme(order.poll_ready(&retries).await, "polling HTTP-01 authorization")?;
+    let step = match request.challenge {
+        Challenge::Http01 => "polling HTTP-01 authorization",
+        Challenge::Dns01 => "polling DNS-01 authorization",
+    };
+    let status = acme(order.poll_ready(&retries).await, step)?;
     if status != OrderStatus::Ready {
         return Err(IssueError::Order(status));
     }

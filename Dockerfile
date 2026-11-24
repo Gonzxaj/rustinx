@@ -26,7 +26,7 @@ LABEL org.opencontainers.image.title="rustinx" \
 # tini comes from the pinned Debian release; its security updates are wanted, not a fixed version.
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends curl tini \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o nginx -g nginx -m 0700 /data /run/rustinx /var/cache/rustinx \
     && install -d -o root -g root -m 0755 /etc/rustinx /etc/nginx/user_conf.d \

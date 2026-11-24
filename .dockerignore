@@ -6,3 +6,4 @@ target/
 *.key
 
 .rustinx-data/
+.rustinx-secrets/

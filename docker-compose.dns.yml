@@ -1,0 +1,16 @@
+# Use with docker-compose.yml to enable DNS-01 in the development container.
+services:
+  rustinx:
+    volumes:
+      - type: bind
+        source: ${RUSTINX_CERTIFICATES_FILE:-./certificates.toml}
+        target: /etc/rustinx/certificates.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - cloudflare_dns_token
+
+secrets:
+  cloudflare_dns_token:
+    file: ${RUSTINX_DNS_TOKEN_FILE:-./.rustinx-secrets/cloudflare-dns-token}

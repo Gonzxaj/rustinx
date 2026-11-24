@@ -8,3 +8,4 @@
 *.key
 
 .rustinx-data/
+.rustinx-secrets/

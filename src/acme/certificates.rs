@@ -34,6 +34,7 @@ pub enum CertificatesError {
 #[serde(deny_unknown_fields)]
 struct RawFile {
     acme: RawAcme,
+    cloudflare: Option<CloudflareSettings>,
     renewal: Option<RenewalSettings>,
     #[serde(default, rename = "certificate")]
     certificates: Vec<CertificateRequest>,
@@ -70,8 +71,31 @@ pub struct CertificateRequest {
     pub id: String,
     /// DNS names (SAN). The first one is the primary name.
     pub domains: Vec<String>,
+    #[serde(default)]
+    pub challenge: Challenge,
     /// Opt in to generated HTTPS for the declared domains.
     pub https: Option<HttpsSettings>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum Challenge {
+    #[default]
+    #[serde(rename = "http-01")]
+    Http01,
+    #[serde(rename = "dns-01")]
+    Dns01,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareSettings {
+    pub zone_id: String,
+    #[serde(default = "default_dns_token_file")]
+    pub token_file: PathBuf,
+}
+
+fn default_dns_token_file() -> PathBuf {
+    "/run/secrets/cloudflare_dns_token".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -86,6 +110,7 @@ pub struct HttpsSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificatesConfig {
     pub acme: AcmeSettings,
+    pub cloudflare: Option<CloudflareSettings>,
     pub renewal: Option<RenewalSettings>,
     pub certificates: Vec<CertificateRequest>,
 }
@@ -147,6 +172,15 @@ impl CertificatesConfig {
                 "invalid renewal threshold, interval or retry limits".into(),
             ));
         }
+        if let Some(cloudflare) = &raw.cloudflare
+            && (cloudflare.zone_id.len() != 32
+                || !cloudflare.zone_id.bytes().all(|b| b.is_ascii_hexdigit())
+                || !cloudflare.token_file.is_absolute())
+        {
+            return Err(ParseError::Invalid(
+                "Cloudflare requires a 32-digit hexadecimal zone_id and an absolute token_file".into(),
+            ));
+        }
         let mut ids = HashSet::new();
         for cert in &raw.certificates {
             validate_id(&cert.id)?;
@@ -157,6 +191,11 @@ impl CertificatesConfig {
                 )));
             }
             validate_domains(cert)?;
+            if cert.challenge == Challenge::Dns01 && raw.cloudflare.is_none() {
+                return Err(ParseError::Invalid(
+                    "dns-01 requires a [cloudflare] section".into(),
+                ));
+            }
             if let Some(https) = &cert.https
                 && (!https.include.is_absolute()
                     || !https
@@ -174,6 +213,7 @@ impl CertificatesConfig {
         }
         Ok(Self {
             acme,
+            cloudflare: raw.cloudflare,
             renewal: raw.renewal,
             certificates: raw.certificates,
         })
@@ -267,13 +307,18 @@ fn validate_domains(cert: &CertificateRequest) -> Result<(), ParseError> {
     }
     let mut seen = HashSet::new();
     for domain in &cert.domains {
-        if domain.starts_with("*.") {
-            return Err(ParseError::Invalid(format!(
-                "certificate {:?}: wildcard {domain:?} requires DNS-01, which is not supported yet",
-                cert.id
-            )));
-        }
-        if !is_dns_name(domain) {
+        let base = if let Some(base) = domain.strip_prefix("*.") {
+            if cert.challenge != Challenge::Dns01 || cert.https.is_some() {
+                return Err(ParseError::Invalid(format!(
+                    "certificate {:?}: wildcard {domain:?} requires DNS-01 and manual HTTPS configuration",
+                    cert.id
+                )));
+            }
+            base
+        } else {
+            domain.as_str()
+        };
+        if !is_dns_name(base) {
             return Err(ParseError::Invalid(format!(
                 "certificate {:?}: {domain:?} is not a valid lowercase DNS name",
                 cert.id
@@ -323,6 +368,29 @@ domains = ["example.com", "www.example.com"]
             Err(ParseError::Invalid(message)) => message,
             other => panic!("expected validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dns_01_accepts_wildcards_and_requires_cloudflare_settings() {
+        let config = VALID
+            .replace(
+                "[[certificate]]",
+                "[cloudflare]\nzone_id = \"0123456789abcdef0123456789abcdef\"\n\n[[certificate]]",
+            )
+            .replace(
+                "domains = [\"example.com\", \"www.example.com\"]",
+                "domains = [\"example.com\", \"*.example.com\"]\nchallenge = \"dns-01\"",
+            );
+        let parsed = CertificatesConfig::parse(&config).unwrap();
+        assert_eq!(parsed.certificates[0].challenge, Challenge::Dns01);
+        assert_eq!(parsed.certificates[0].domains[1], "*.example.com");
+        assert!(
+            invalid(&config.replace(
+                "[cloudflare]\nzone_id = \"0123456789abcdef0123456789abcdef\"\n",
+                ""
+            ))
+            .contains("requires a [cloudflare]")
+        );
     }
 
     #[test]

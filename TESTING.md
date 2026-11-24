@@ -817,6 +817,23 @@ Rust tests exercise expiry boundaries with simulated timestamps, short certifica
 lifetimes, ACME rate-limit classification, retry caps and persistence, and cancellation
 of an in-flight request without leaving its issuance lock held.
 
+### Phase 5 DNS-01 checks
+
+The Rust tests use a local HTTP fixture to verify Cloudflare-style TXT creation, two
+challenge values at the same owner name, propagation polling and timeout, rejected
+credentials, API errors and recovery when the POST response was lost. The cleanup check
+includes an unrelated TXT record and verifies that Rustinx sends DELETE only for its own IDs.
+Configuration tests cover DNS-01 wildcard names. Use the full Rust Docker image for
+these unit tests because they exercise the same curl transport as the runtime image.
+The existing Docker end-to-end suite
+continues to cover HTTP-01, HTTPS activation and renewal.
+
+On 2026-11-24, public Let's Encrypt Staging issued a DNS-01 certificate for
+`acme-test.example.com` and `*.acme-test.example.com`. The X.509 SAN extension
+contained both names, the private key had mode `0600`, and a Cloudflare API query
+confirmed that no Rustinx TXT records remained at the challenge name. The one-off
+Docker container did not start Nginx or open a public port.
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.

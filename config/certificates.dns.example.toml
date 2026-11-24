@@ -1,0 +1,12 @@
+[acme]
+directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+terms_of_service_agreed = true
+challenge_timeout_secs = 300
+
+[cloudflare]
+zone_id = "00000000000000000000000000000000"
+
+[[certificate]]
+id = "acme-test-dns-staging"
+domains = ["acme-test.example.com", "*.acme-test.example.com"]
+challenge = "dns-01"

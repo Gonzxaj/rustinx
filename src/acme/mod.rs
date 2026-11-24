@@ -2,6 +2,7 @@
 
 pub mod cert_store;
 pub mod certificates;
+mod cloudflare;
 mod issuance;
 pub(crate) mod renewal;
 

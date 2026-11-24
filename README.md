@@ -111,6 +111,40 @@ Staging run requires HTTP access from the CA on port 80. For an isolated local r
 The command reuses the persisted account and valid certificates for the same ACME directory and
 domain list. Keep each certificate's `id` stable so its paths remain stable.
 
+## Issue with DNS-01 and Cloudflare
+
+DNS-01 validates through public TXT records, so the certificate issuer does not need to
+reach Nginx on port 80. The HTTP-01 challenge remains the default per certificate.
+
+1. In Cloudflare, create an API token with **Zone → DNS → Edit** restricted to the intended
+   zone. Copy its Zone ID from the zone dashboard.
+2. Create a local directory with `mkdir -m 0700 .rustinx-secrets` and save just the token
+   in `.rustinx-secrets/cloudflare-dns-token`. Set the file mode to `0444` so the container's
+   unprivileged user can read the mounted secret. The parent directory stays private and
+   is excluded from Git and the Docker build context. This token is separate from the
+   Cloudflare Tunnel token. Compose mounts it at `/run/secrets/cloudflare_dns_token`.
+3. Copy `config/certificates.dns.example.toml` to `certificates.toml`, enter the Zone ID and
+   use the requested names in `domains`. The example requests the dedicated test hostname
+   and its wildcard using Let's Encrypt Staging. Each DNS certificate uses
+   `challenge = "dns-01"`.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dns.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dns.yml exec rustinx rustinx issue
+```
+
+If you're also using the tunnel, include `-f docker-compose.tunnel.yml` on the Compose
+commands. To mount another certificate config, set `RUSTINX_CERTIFICATES_FILE`.
+Outside Compose, use `[cloudflare].token_file` to point at a readable secret file.
+
+Rustinx waits until Cloudflare's public resolver returns the exact TXT value. This uses
+the ACME `challenge_timeout_secs` budget. Rustinx tracks the Cloudflare records it creates
+and retries cleanup on the next issuance attempt if a cleanup was interrupted. Keep the
+same zone and token available while cleanup is pending.
+
+Wildcard certificates can be issued with DNS-01 and referenced from a manually configured Nginx
+server. Managed HTTPS continues to use exact names that match explicit port-80 servers.
+
 ## Enable managed HTTPS
 
 Declare your domains with explicit `server_name` entries in a plain port-80 server under
