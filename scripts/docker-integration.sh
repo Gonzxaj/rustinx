@@ -165,6 +165,7 @@ log "scenario: startup"
 record
 app="$(cid rustinx)"
 expect "startup: container healthy" "$(health "$app")" "healthy"
+docker stats --no-stream --format 'CPU={{.CPUPerc}} RAM={{.MemUsage}} PIDs={{.PIDs}}' "$app" > "$LOG_DIR/resources.txt"
 expect_log "startup: rustinx validated nginx config" "$app" "nginx configuration is valid"
 expect_log "startup: rustinx reports nginx healthy" "$app" "nginx is healthy"
 addr="$("${compose[@]}" port rustinx 80)"
@@ -172,7 +173,7 @@ expect "nginx: serves test page" "$(curl -fsS --max-time 5 "http://$addr/" | gre
 expect "nginx: health endpoint not published" "$(inspect '{{json .NetworkSettings.Ports}}' "$app" | grep -c 8081 || true)" "0"
 processes="$(docker top "$app" -eo pid,ppid,user,args)"
 printf '%s\n' "$processes" > "$LOG_DIR/processes.txt"
-expect "process tree: tini is PID 1" "$(printf '%s\n' "$processes" | grep -c '/usr/bin/tini -- /usr/local/bin/rustinx run')" "1"
+expect "process tree: tini is PID 1" "$(printf '%s\n' "$processes" | grep -c '/sbin/tini -- /usr/local/bin/rustinx run')" "1"
 expect "process tree: single nginx master" "$(printf '%s\n' "$processes" | grep -c 'nginx: master process')" "1"
 expect "process tree: nginx workers running" "$(printf '%s\n' "$processes" | grep -c 'nginx: worker process' | sed 's/^[1-9][0-9]*$/ok/')" "ok"
 expect "security: runs as uid 101" "$(in_container id -u)" "101"
@@ -215,10 +216,10 @@ expect "sigint: state persisted (start count 3)" "$(start_count)" "3"
 log "scenario: stalled nginx makes the container unhealthy"
 master="$(in_container cat /run/rustinx/nginx.pid)"
 # shellcheck disable=SC2016 # $1 is expanded by the shell inside the container.
-in_container sh -c 'kill -s STOP -- "-$1"' sh "$master"
+in_container sh -c 'kill -s STOP "-$1"' sh "$master"
 if wait_health "$app" unhealthy; then pass "health: stalled nginx reported unhealthy"; else fail "health: stalled nginx reported unhealthy" "$(health "$app")"; fi
 # shellcheck disable=SC2016 # $1 is expanded by the shell inside the container.
-in_container sh -c 'kill -s CONT -- "-$1"' sh "$master"
+in_container sh -c 'kill -s CONT "-$1"' sh "$master"
 if wait_health "$app" healthy; then pass "health: recovered nginx reported healthy"; else fail "health: recovered nginx reported healthy" "$(health "$app")"; fi
 
 # --- Unexpected nginx termination ------------------------------------------------------------

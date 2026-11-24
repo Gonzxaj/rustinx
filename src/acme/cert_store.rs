@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x509_parser::pem::parse_x509_pem;
 
-use crate::storage::write_atomic;
+use crate::storage::{read_owned_file, write_atomic};
 
 pub const METADATA_SCHEMA_VERSION: u32 = 1;
 
@@ -27,6 +27,10 @@ pub enum CertStoreError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("invalid certificate storage ID")]
+    InvalidId,
+    #[error("{0} must be a real certificate directory")]
+    UnsafeDirectory(PathBuf),
     #[error("invalid certificate chain: {0}")]
     InvalidChain(String),
 }
@@ -84,7 +88,7 @@ impl CertStore {
         directory: &str,
     ) -> Result<Option<T>, CertStoreError> {
         let path = self.account_path(directory);
-        match fs::read(&path) {
+        match read_owned_file(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
                 .map_err(|source| CertStoreError::Json { path, source }),
@@ -108,14 +112,24 @@ impl CertStore {
     }
 
     pub fn load_metadata(&self, id: &str) -> Result<Option<CertificateMetadata>, CertStoreError> {
-        let path = self.certificate_dir(id).join("metadata.json");
-        match fs::read(&path) {
+        let dir = self.checked_certificate_dir(id)?;
+        let path = dir.join("metadata.json");
+        match read_owned_file(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
                 .map_err(|source| CertStoreError::Json { path, source }),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(CertStoreError::Io { path, source }),
         }
+    }
+
+    fn checked_certificate_dir(&self, id: &str) -> Result<PathBuf, CertStoreError> {
+        if !super::certificates::valid_id(id) {
+            return Err(CertStoreError::InvalidId);
+        }
+        let dir = self.certificate_dir(id);
+        actual_directory(&dir)?;
+        Ok(dir)
     }
 
     /// Stores a new certificate. The previous one stays in place until the new directory is complete,
@@ -138,11 +152,9 @@ impl CertStore {
             not_before_unix: not_before,
             not_after_unix: not_after,
         };
-        let final_dir = self.certificate_dir(id);
+        self.recover(id)?;
+        let final_dir = self.checked_certificate_dir(id)?;
         let staging = self.certificates.join(format!(".{id}.new"));
-        let previous = self.certificates.join(format!(".{id}.old"));
-        remove_dir_if_exists(&staging)?;
-        remove_dir_if_exists(&previous)?;
         fs::DirBuilder::new()
             .mode(0o700)
             .create(&staging)
@@ -167,28 +179,32 @@ impl CertStore {
             return Err(err.into());
         }
 
-        // Two renames: a crash between them leaves `.<id>.old`, which `recover` puts back.
-        if final_dir.exists() {
-            fs::rename(&final_dir, &previous).map_err(io_err(&final_dir))?;
-        }
-        if let Err(source) = fs::rename(&staging, &final_dir) {
-            let _ = fs::rename(&previous, &final_dir);
-            return Err(CertStoreError::Io {
-                path: final_dir,
-                source,
-            });
+        if actual_directory(&final_dir)? {
+            // Publish the complete set in one operation, keeping the live path present.
+            let dir = fs::File::open(&self.certificates).map_err(io_err(&self.certificates))?;
+            rustix::fs::renameat_with(
+                &dir,
+                &staging,
+                &dir,
+                &final_dir,
+                rustix::fs::RenameFlags::EXCHANGE,
+            )
+            .map_err(|err| io_err(&final_dir)(err.into()))?;
+        } else {
+            fs::rename(&staging, &final_dir).map_err(io_err(&final_dir))?;
         }
         sync_dir(&self.certificates)?;
-        remove_dir_if_exists(&previous)?;
+        remove_dir_if_exists(&staging)?;
         Ok(metadata)
     }
 
     /// Restores a certificate left aside by an interrupted `install` and removes incomplete ones.
     pub fn recover(&self, id: &str) -> Result<(), CertStoreError> {
-        let final_dir = self.certificate_dir(id);
+        let final_dir = self.checked_certificate_dir(id)?;
         let previous = self.certificates.join(format!(".{id}.old"));
-        if !final_dir.exists() && previous.exists() {
+        if !actual_directory(&final_dir)? && actual_directory(&previous)? {
             fs::rename(&previous, &final_dir).map_err(io_err(&previous))?;
+            sync_dir(&self.certificates)?;
         }
         remove_dir_if_exists(&previous)?;
         remove_dir_if_exists(&self.certificates.join(format!(".{id}.new")))
@@ -233,6 +249,15 @@ fn split_chain(chain_pem: &str) -> Result<(String, String, i64, i64), CertStoreE
     Ok((leaf.clone(), blocks[1..].concat(), not_before, not_after))
 }
 
+fn actual_directory(path: &Path) -> Result<bool, CertStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(true),
+        Ok(_) => Err(CertStoreError::UnsafeDirectory(path.to_owned())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(io_err(path)(err)),
+    }
+}
+
 fn remove_dir_if_exists(path: &Path) -> Result<(), CertStoreError> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -273,6 +298,22 @@ mod tests {
         Storage::open(dir.path()).unwrap();
         let store = CertStore::new(dir.path());
         (dir, store)
+    }
+
+    #[test]
+    fn recovery_rejects_path_traversal_and_symlinked_certificate() {
+        let data = tempfile::tempdir().unwrap();
+        crate::storage::Storage::open(data.path()).unwrap();
+        let store = CertStore::new(data.path());
+        assert!(matches!(
+            store.recover("../state"),
+            Err(CertStoreError::InvalidId)
+        ));
+        std::os::unix::fs::symlink(data.path().join("state"), store.certificate_dir("example")).unwrap();
+        assert!(matches!(
+            store.recover("example"),
+            Err(CertStoreError::UnsafeDirectory(_))
+        ));
     }
 
     #[test]

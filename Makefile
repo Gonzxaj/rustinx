@@ -11,6 +11,9 @@ DEV_COMPOSE := docker compose -p rustinx-dev -f docker-compose.yml
 # Linters and dependency checkers run in throwaway containers; nothing is installed on the host.
 SHELLCHECK_IMAGE := koalaman/shellcheck:v0.10.0
 HADOLINT_IMAGE := hadolint/hadolint:v2.12.0
+TRIVY_IMAGE ?= aquasec/trivy:0.76.2
+SECURITY_IMAGE := rustinx:security-local
+SECURITY_REPORTS := $(CURDIR)/target/security
 CARGO_AUDIT_VERSION := 0.23.0
 CARGO_DENY_VERSION := 0.21.0
 TOOLS_IMAGE := rustinx-tools:audit-$(CARGO_AUDIT_VERSION)-deny-$(CARGO_DENY_VERSION)
@@ -18,7 +21,7 @@ DOCKER_TOOL := docker run --rm --label rustinx.tools=1
 SCRIPTS := $(wildcard scripts/*.sh scripts/lib/*.sh tests/fixtures/*.sh)
 
 .PHONY: help build test test-unit test-integration test-host test-docker test-e2e test-clean \
-	lint security tools-image cache-clean release dev-up dev-down dev-logs
+	lint security image-security tools-image cache-clean release dev-up dev-down dev-logs
 
 help:
 	@echo "build             cargo release build + $(DEV_IMAGE) image"
@@ -29,6 +32,7 @@ help:
 	@echo "test-clean        remove leftover resources of interrupted test runs (run-scoped only)"
 	@echo "lint              rustfmt, clippy, shell syntax, shellcheck and hadolint (in Docker)"
 	@echo "security          cargo audit + cargo deny (in a local tools image)"
+	@echo "image-security    scan a local image and generate an SBOM in target/security"
 	@echo "cache-clean       remove project-owned caches (requires CONFIRM=yes)"
 	@echo "release           release build + $(RELEASE_IMAGE) image, nothing is published"
 	@echo "dev-up/dev-down/dev-logs  manage the rustinx-dev Compose project"
@@ -66,6 +70,17 @@ lint:
 security: tools-image
 	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo audit --deny warnings
 	$(DOCKER_TOOL) -v "$(CURDIR):/src:ro" -w /src $(TOOLS_IMAGE) cargo deny --locked check
+
+image-security:
+	mkdir -p "$(SECURITY_REPORTS)"
+	docker build --pull -t $(SECURITY_IMAGE) .
+	@archive="$$(mktemp "$(SECURITY_REPORTS)/image.XXXXXXXX")"; \
+	trap 'rm -f "$$archive"' EXIT; \
+	docker save -o "$$archive" $(SECURITY_IMAGE); \
+	scan=( $(DOCKER_TOOL) -v "$$archive:/image.tar:ro" -v rustinx-trivy-cache:/cache $(TRIVY_IMAGE) image --no-progress --cache-dir /cache --input /image.tar ); \
+	"$${scan[@]}" --format cyclonedx > "$(SECURITY_REPORTS)/image.cdx.json"; \
+	"$${scan[@]}" --scanners vuln > "$(SECURITY_REPORTS)/vulnerabilities-all.txt"; \
+	"$${scan[@]}" --scanners vuln --severity HIGH,CRITICAL --exit-code 1 > "$(SECURITY_REPORTS)/vulnerabilities.txt"
 
 tools-image:
 	docker build --label rustinx.tools=$(TOOLS_IMAGE) \

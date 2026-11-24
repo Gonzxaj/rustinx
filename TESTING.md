@@ -834,6 +834,43 @@ contained both names, the private key had mode `0600`, and a Cloudflare API quer
 confirmed that no Rustinx TXT records remained at the challenge name. The one-off
 Docker container did not start Nginx or open a public port.
 
+### Phase 6 local security checks
+
+On 2026-11-24, the Linux AMD64 Docker checks passed 49 Rust unit tests, 12 supervisor
+integration tests, and 40 checks with real Nginx. The suite verified graceful shutdown,
+unexpected master exit, restart, health checks, a read-only root filesystem, UID 101
+and dropped capabilities. The startup resource sample recorded about 13 MiB of RAM
+and 28 tasks on the local host. It was a point-in-time sample with no load test.
+
+The storage tests covered symlink and hard-link rejection, path traversal, atomic
+certificate replacement, recovery of a legacy interrupted replacement, and preserving
+corrupt renewal state. A backup and restore exercise used two isolated Docker volumes
+and verified file contents, UID 101 and permissions `0600` and `0700`.
+
+`make security` passed cargo-audit and cargo-deny for the supported Linux targets.
+`make image-security` produced a CycloneDX inventory and reported 64 high findings and
+zero critical findings for the rebuilt Debian image. The first scan had flagged libxml2.
+The bundled Nginx configuration does not load the njs or XSLT modules that brought it into
+the image, so those modules and their XML dependencies were removed. The final image
+inventory confirmed libxml2 was absent.
+
+The final image passed the Pebble end-to-end tests for issuance, HTTPS activation and
+renewal. Rust formatting, Clippy, ShellCheck and Hadolint passed. The AArch64 release
+binary cross-compiled inside Docker and its ELF header reported AArch64. The local
+Docker builder only supports AMD64 execution. The full ARM64 image and the separate
+Debian server still require validation.
+
+### Alpine image follow-up
+
+On 2026-11-24, the AMD64 image based on `nginx:1.31.10-alpine3.24-slim` returned zero
+vulnerability findings at all severities using Trivy 0.76.2. The earlier Debian image
+had reported 64 high findings. Cargo audit and the license checks still passed.
+`make image-security` writes an all-severity report and fails on high or critical findings.
+The upstream Nginx security advisories were checked separately from the image scan.
+The Alpine container passed all 40 real-Nginx integration checks and the Pebble end-to-end
+suite. Run the shell-based supervisor fixture in the GNU Rust image, where the test shell
+handles its SIGQUIT trap. Test signals against real Nginx in the Alpine image.
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.

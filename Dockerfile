@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
 
-ARG RUST_IMAGE=rust:1.99.1-slim-trixie
-ARG NGINX_IMAGE=nginx:1.30-trixie
+ARG RUST_IMAGE=rust:1.99.1-alpine3.24
+ARG NGINX_IMAGE=nginx:1.31.10-alpine3.24-slim
 
-# Base images are pinned through the ARGs above.
+# Use the same Alpine release for the musl builder and runtime.
 # hadolint ignore=DL3006
 FROM ${RUST_IMAGE} AS builder
+# hadolint ignore=DL3018
+RUN apk add --no-cache build-base
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -23,11 +25,9 @@ LABEL org.opencontainers.image.title="rustinx" \
       org.opencontainers.image.description="Nginx supervised by a Rust manager"
 
 # tini runs as PID 1 and reaps zombies; rustinx supervises Nginx.
-# tini comes from the pinned Debian release; its security updates are wanted, not a fixed version.
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl tini \
-    && rm -rf /var/lib/apt/lists/* \
+# hadolint ignore=DL3018
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates curl tini \
     && install -d -o nginx -g nginx -m 0700 /data /run/rustinx /var/cache/rustinx \
     && install -d -o root -g root -m 0755 /etc/rustinx /etc/nginx/user_conf.d \
         /etc/nginx/managed-conf.d /usr/share/rustinx/html
@@ -50,5 +50,5 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=3 \
     CMD ["/usr/local/bin/rustinx", "healthcheck"]
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/rustinx"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/rustinx"]
 CMD ["run"]

@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::certificates::CloudflareSettings;
-use crate::storage::{StorageError, write_atomic};
+use crate::storage::{StorageError, read_owned_file, write_atomic};
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 const RESOLVER: &str = "https://one.one.one.one/dns-query";
@@ -101,7 +101,7 @@ impl Cloudflare {
         {
             return Err(DnsError::Token);
         }
-        let journal: Journal = match fs::read(&journal_path) {
+        let journal: Journal = match read_owned_file(&journal_path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| DnsError::Journal)?,
             Err(err) if err.kind() == io::ErrorKind::NotFound => Journal {
                 zone: settings.zone_id.clone(),

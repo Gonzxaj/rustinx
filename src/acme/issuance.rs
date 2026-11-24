@@ -79,7 +79,7 @@ pub(crate) async fn issue_with_clock(
         return Ok(());
     }
     let storage = Storage::open(data_dir)?;
-    let _lock = lock_issuance(storage.root())?;
+    let lock = lock_issuance(storage.root())?;
     let challenges = storage.root().join("challenges/http-01");
     // A previous process may have been killed before it could remove its responses.
     clear_challenges(&challenges)?;
@@ -113,7 +113,11 @@ pub(crate) async fn issue_with_clock(
     if let Err(err) = &dns_cleanup {
         tracing::error!(target: "rustinx::acme", error = %err, "DNS cleanup pending; the next run will retry");
     }
-    result.and(cleanup).and(dns_cleanup)
+    let unlocked = lock.unlock().map_err(|source| IssueError::Io {
+        step: "release issuance lock",
+        source,
+    });
+    result.and(cleanup).and(dns_cleanup).and(unlocked)
 }
 
 pub(crate) fn lock_issuance(root: &Path) -> Result<File, IssueError> {
@@ -121,6 +125,7 @@ pub(crate) fn lock_issuance(root: &Path) -> Result<File, IssueError> {
         .write(true)
         .create(true)
         .truncate(false)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .mode(0o600)
         .open(root.join("accounts/.issuance.lock"))
         .map_err(|source| IssueError::Io {

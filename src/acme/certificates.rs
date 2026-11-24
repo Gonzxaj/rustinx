@@ -21,7 +21,7 @@ const MAX_DOMAINS: usize = 100;
 pub enum CertificatesError {
     #[error("failed to read {path}: {source}")]
     Read { path: PathBuf, source: std::io::Error },
-    #[error("invalid {path}: {source}")]
+    #[error("invalid TOML in {path}")]
     Parse {
         path: PathBuf,
         source: Box<toml::de::Error>,
@@ -282,14 +282,17 @@ fn validate_acme(raw: RawAcme) -> Result<AcmeSettings, ParseError> {
     })
 }
 
-fn validate_id(id: &str) -> Result<(), ParseError> {
-    let valid = !id.is_empty()
+pub(crate) fn valid_id(id: &str) -> bool {
+    !id.is_empty()
         && id.len() <= MAX_ID_LEN
         && !id.starts_with(['.', '-'])
         && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'));
-    if valid {
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+fn validate_id(id: &str) -> Result<(), ParseError> {
+    if valid_id(id) {
         Ok(())
     } else {
         Err(ParseError::Invalid(format!(
@@ -368,6 +371,16 @@ domains = ["example.com", "www.example.com"]
             Err(ParseError::Invalid(message)) => message,
             other => panic!("expected validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn toml_diagnostic_does_not_expose_inline_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("certificates.toml");
+        std::fs::write(&path, "[cloudflare]\ntoken = 'secret-value'\n").unwrap();
+        let error = CertificatesConfig::load(&path).unwrap_err();
+        assert!(error.to_string().contains("invalid TOML"));
+        assert!(!error.to_string().contains("secret-value"));
     }
 
     #[test]

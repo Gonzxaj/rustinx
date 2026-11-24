@@ -4,8 +4,8 @@
 //! `tokio::task::spawn_blocking`.
 
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -124,7 +124,7 @@ fn ensure_private_dir(path: &Path) -> Result<(), StorageError> {
 
 /// Loads the state file. A corrupt file is moved aside instead of being overwritten.
 fn load_state(path: &Path, now_unix: u64) -> Result<Option<RuntimeState>, StorageError> {
-    let contents = match fs::read(path) {
+    let contents = match read_owned_file(path) {
         Ok(contents) => contents,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(io_err(path)(err)),
@@ -149,36 +149,40 @@ fn load_state(path: &Path, now_unix: u64) -> Result<Option<RuntimeState>, Storag
     }
 }
 
-/// Writes `bytes` to `path` via a temporary file in the same directory, fsync and rename.
+/// Read a regular file inside a Rustinx-owned directory without following a final symlink.
+pub(crate) fn read_owned_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file with one link",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Writes through a fresh private file in the same directory, then fsyncs and renames.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     let dir = path
         .parent()
         .ok_or_else(|| StorageError::UnsafeEntry(path.to_owned()))?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| StorageError::UnsafeEntry(path.to_owned()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp-{}",
-        file_name.to_string_lossy(),
-        std::process::id()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(FILE_MODE)
-            .open(&tmp)
-            .map_err(io_err(&tmp))?;
-        file.write_all(bytes).map_err(io_err(&tmp))?;
-        file.sync_all().map_err(io_err(&tmp))?;
-        fs::rename(&tmp, path).map_err(io_err(path))?;
-        File::open(dir).and_then(|d| d.sync_all()).map_err(io_err(dir))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    let mut file = tempfile::Builder::new()
+        .prefix(".rustinx-write-")
+        .permissions(fs::Permissions::from_mode(FILE_MODE))
+        .tempfile_in(dir)
+        .map_err(io_err(dir))?;
+    file.write_all(bytes).map_err(io_err(file.path()))?;
+    file.as_file().sync_all().map_err(io_err(file.path()))?;
+    file.persist(path).map_err(|err| io_err(path)(err.error))?;
+    File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(io_err(dir))
 }
 
 #[cfg(test)]
@@ -188,6 +192,23 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn owned_file_reads_reject_links_and_atomic_write_leaves_link_target_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let link = dir.path().join("link");
+        fs::write(&original, b"original").unwrap();
+        symlink(&original, &link).unwrap();
+        assert!(read_owned_file(&link).is_err());
+        write_atomic(&link, b"replacement").unwrap();
+        assert_eq!(fs::read(&original).unwrap(), b"original");
+        assert_eq!(read_owned_file(&link).unwrap(), b"replacement");
+        assert_eq!(fs::metadata(&link).unwrap().permissions().mode() & 0o777, 0o600);
+
+        fs::hard_link(&original, dir.path().join("alias")).unwrap();
+        assert!(read_owned_file(&original).is_err());
     }
 
     #[test]

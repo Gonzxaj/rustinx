@@ -9,3 +9,4 @@ target/
 .rustinx-secrets/
 
 **/certificates.toml
+rustinx-data.*.tar.gz

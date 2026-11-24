@@ -278,6 +278,52 @@ to Docker's UID mapping, use the same export command with the container running.
 State files are written atomically. A corrupt `runtime.json` is preserved as
 `runtime.json.corrupt-<unix-time>` and a new one is created.
 
+## Production image
+
+The runtime uses the official `nginx:1.31.10-alpine3.24-slim` base. Rustinx is built for musl, and
+the runtime adds only the CA certificates, curl and tini packages. The base omits optional
+Nginx modules such as njs and XSLT. If you use those modules, maintain an image that
+includes them and scan it separately. Certificate replacement uses Linux's atomic directory exchange. Use
+a volume filesystem that supports `RENAME_EXCHANGE`, such as ext4 or XFS. Mount user
+configuration read-only and keep the Compose privilege settings when deploying.
+
+## Back up and restore certificate data
+
+A backup contains private keys and ACME account credentials. Store the archive in an
+access-controlled, encrypted location. Keep the Compose and Nginx configuration, certificate
+requests, and any external token files in your deployment's separate configuration backup.
+
+For a consistent snapshot, schedule a maintenance window and stop the Rustinx service before
+archiving its volume. Use the same Compose options as the running deployment:
+
+```bash
+umask 077
+backup="$(mktemp ./rustinx-data.XXXXXXXX.tar.gz)"
+docker compose stop rustinx
+docker compose run --rm -T --no-deps --entrypoint tar rustinx \
+  -C /data -czf - accounts certificates state > "$backup"
+docker compose start rustinx
+```
+
+Check that the archive was written successfully before relying on it. Restore into a **new,
+empty volume** first. For the development Compose file, a distinct project name creates a
+separate named volume. Use an unused project name and change the port before starting the
+service if a development instance is already running:
+
+```bash
+backup=./rustinx-data.ABCDEFGH.tar.gz
+docker compose -p rustinx-restore-check run --rm -T --no-deps --entrypoint sh rustinx -ec '
+  test -z "$(find /data -mindepth 1 -print -quit)"
+  tar --no-same-owner -C /data -xzf -
+' < "$backup"
+RUSTINX_DEV_HTTP_PORT=18081 docker compose -p rustinx-restore-check up -d --wait
+```
+
+Restore only an archive you created or otherwise trust. Before switching a live deployment
+to the restored volume, verify Nginx health and the expected certificate files and expiry.
+For a bind-mounted deployment, point the restore project at a new directory writable by the
+container UID before running the restore. Keep the previous volume until verification succeeds.
+
 ## Commands and exit codes
 
 | Command | Description |
@@ -307,6 +353,7 @@ State files are written atomically. A corrupt `runtime.json` is preserved as
 | `make test-clean` | Removes leftovers of interrupted test runs (run-scoped only) |
 | `make lint` | rustfmt, clippy `-D warnings`, shell syntax, shellcheck and hadolint (run in Docker) |
 | `make security` | `cargo audit` and `cargo deny check` in a local `rustinx-tools` image |
+| `make image-security` | Scan the local image with Trivy, report all severities, fail on high or critical findings, and write a CycloneDX SBOM under `target/security/` |
 | `make cache-clean CONFIRM=yes` | Removes `./target` only |
 | `make release` | Builds `rustinx:<version>` locally; nothing is pushed |
 

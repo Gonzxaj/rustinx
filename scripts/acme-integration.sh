@@ -46,7 +46,8 @@ chmod a+r "$FIXTURES/pebble-ca.pem"
 in_rustinx() { "${compose[@]}" exec -T rustinx "$@"; }
 
 deadline=$((SECONDS + 20))
-until in_rustinx bash -c 'true </dev/tcp/127.0.0.1/14000' 2>/dev/null; do
+until in_rustinx curl --noproxy '*' --silent --fail --max-time 2 \
+    --cacert /fixtures/pebble-ca.pem https://localhost:14000/dir >/dev/null 2>&1; do
     [ "$SECONDS" -lt "$deadline" ] || exit 1
     sleep 1
 done

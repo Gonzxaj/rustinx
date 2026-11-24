@@ -13,7 +13,7 @@ use super::certificates::{CertificatesConfig, CertificatesError, RenewalSettings
 use super::{IssueError, issue_with_clock};
 use crate::config::Config;
 use crate::nginx::https::{self, HttpsError};
-use crate::storage::{StorageError, write_atomic};
+use crate::storage::{StorageError, read_owned_file, write_atomic};
 
 #[derive(Debug, Error)]
 enum RenewalError {
@@ -57,10 +57,27 @@ impl Retry {
 }
 
 fn read_retry(path: &Path) -> Result<Retry, RenewalError> {
-    match std::fs::read(path) {
+    match read_owned_file(path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Retry::default()),
         Err(err) => Err(err.into()),
+    }
+}
+
+fn recover_retry(path: &Path, now: u64) -> Result<Retry, RenewalError> {
+    match read_retry(path) {
+        Err(RenewalError::Json(_)) => {
+            let quarantine = path.with_extension(format!("corrupt-{now}"));
+            std::fs::rename(path, &quarantine)?;
+            warn!(target: "rustinx::renewal", "invalid renewal retry state preserved; delaying the next attempt");
+            let retry = Retry {
+                failures: 0,
+                next_attempt_unix: now + RenewalSettings::default().retry_initial_secs,
+            };
+            save_retry(path, &retry)?;
+            Ok(retry)
+        }
+        result => result,
     }
 }
 
@@ -71,7 +88,7 @@ pub(crate) async fn run(config: &Config, shutdown: CancellationToken) {
         return;
     }
     let retry_path = config.data_dir.join("state/renewal.json");
-    let mut retry = match read_retry(&retry_path) {
+    let mut retry = match recover_retry(&retry_path, unix_seconds()) {
         Ok(retry) => retry,
         Err(err) => {
             warn!(target: "rustinx::renewal", error = %err, "could not recover renewal retry state");
@@ -170,6 +187,20 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_corrupt_retry_state_and_persists_a_safe_retry_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("renewal.json");
+        std::fs::write(&path, b"broken").unwrap();
+        let retry = recover_retry(&path, 100).unwrap();
+        assert_eq!(retry.next_attempt_unix, 160);
+        assert_eq!(
+            std::fs::read(root.path().join("renewal.corrupt-100")).unwrap(),
+            b"broken"
+        );
+        assert_eq!(recover_retry(&path, 105).unwrap().next_attempt_unix, 160);
+    }
 
     #[test]
     fn retries_increase_to_the_cap_and_rate_limits_use_the_longer_delay() {
