@@ -763,6 +763,47 @@ health endpoint was healthy; ANSI colour codes in container logs; Nginx workers 
 killed master; a false negative in log assertions (`grep -q` + `pipefail` SIGPIPE); shellcheck
 SC2015 in the cleanup helper.
 
+### Phase 2 local ACME suite
+
+`make test-e2e` builds the runtime image and starts it with Pebble on an internal Docker network
+without published ports. Pebble validates real HTTP-01 responses served by Nginx for reserved
+`.test` names. The suite checks issuance for multiple names, private file modes, reuse of a current
+certificate, account recovery after restarting rustinx, and rejection when Nginx returns 404.
+It verifies that failure preserves the prior certificate and removes the HTTP-01 responses.
+It also checks the effective configuration printed by `rustinx nginx-config`.
+
+Each run records its labelled resources and writes logs under `target/test-runs/<run-id>/`.
+Cleanup uses the same manifest mechanism as `make test-docker`. The test uses the
+[Pebble test CA](https://github.com/letsencrypt/pebble/blob/main/test/certs/README.md).
+Public Let's Encrypt Staging validation is a separate check using the dedicated host described
+in section 4.
+
+On 2026-11-24, Docker runs passed 37 Rust unit tests, 12 supervisor integration tests,
+40 checks with real Nginx, and the Pebble suite. Rust formatting, Clippy with warnings denied
+and ShellCheck on the ACME script passed. Both Docker integration suites cleaned up their
+run-scoped resources.
+
+### Phase 2 public Staging result
+
+On 2026-11-24, the Docker development instance served the exact HTTP-01 probe body over
+the public Cloudflare Tunnel route for `acme-test.example.com`. The same instance registered
+an account and obtained a certificate from Let's Encrypt Staging. The full chain and private key
+persisted in the Docker data volume, the key mode was `0600`, and the challenge directory was
+removed after issuance.
+
+### Phase 3 managed HTTPS result
+
+On 2026-11-24, `make test-e2e` passed in Docker. It activated two Pebble-issued
+certificates for three hostnames and verified the TLS chain and hostname on requests
+through the managed Nginx servers. The shared reverse proxy served both HTTP and HTTPS.
+The opt-in redirect preserved the path and query and left HTTP-01 reachable. The suite
+rejected duplicate domains and an invalid Nginx snippet, then forced a reload timeout
+and verified that the previous configuration kept serving HTTPS. A subsequent restart
+restored the last confirmed HTTPS configuration.
+
+The same revision passed 38 Rust unit tests, 12 supervisor integration tests, 40
+real-Nginx Docker checks, Rust formatting, Clippy and ShellCheck on the integration script.
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.

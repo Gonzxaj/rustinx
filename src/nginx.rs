@@ -57,9 +57,39 @@ impl Nginx {
 
     /// Runs `nginx -t` and returns its combined output on success.
     pub async fn test_config(&self, timeout: Duration) -> Result<String, NginxError> {
+        let output = self.inspect_config("-t", timeout).await?;
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .trim_end()
+        .to_owned())
+    }
+
+    /// Returns the validated effective configuration, including files expanded by Nginx.
+    pub async fn dump_config(&self, timeout: Duration) -> Result<String, NginxError> {
+        let output = self.inspect_config("-T", timeout).await?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    async fn inspect_config(
+        &self,
+        flag: &str,
+        timeout: Duration,
+    ) -> Result<std::process::Output, NginxError> {
+        self.config_command(&[flag], timeout).await
+    }
+
+    async fn config_command(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<std::process::Output, NginxError> {
         let mut command = Command::new(&self.bin);
         command
-            .args(self.test_args())
+            .args(args)
+            .args(self.common_args())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -71,17 +101,19 @@ impl Nginx {
                 bin: self.bin.clone(),
                 source,
             })?;
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        let text = text.trim_end().to_owned();
         if output.status.success() {
-            Ok(text)
+            Ok(output)
         } else {
             Err(NginxError::InvalidConfig {
                 status: output.status,
-                output: text,
+                output: String::from_utf8_lossy(&output.stderr).trim_end().to_owned(),
             })
         }
+    }
+
+    pub(crate) async fn reload(&self, timeout: Duration) -> Result<(), NginxError> {
+        self.config_command(&["-s", "reload"], timeout).await?;
+        Ok(())
     }
 
     /// Starts the Nginx master in its own process group, so terminal signals reach only the

@@ -6,3 +6,5 @@
 !.env.example
 *.pem
 *.key
+
+.rustinx-data/

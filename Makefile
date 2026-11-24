@@ -25,7 +25,7 @@ help:
 	@echo "test              unit + integration tests (host and Docker)"
 	@echo "test-unit         unit tests"
 	@echo "test-integration  host integration tests (fake nginx) + Docker integration tests (real nginx)"
-	@echo "test-e2e          end-to-end ACME tests (not available until Phase 2)"
+	@echo "test-e2e          end-to-end ACME HTTP-01 tests in Docker with Pebble"
 	@echo "test-clean        remove leftover resources of interrupted test runs (run-scoped only)"
 	@echo "lint              rustfmt, clippy, shell syntax, shellcheck and hadolint (in Docker)"
 	@echo "security          cargo audit + cargo deny (in a local tools image)"
@@ -51,8 +51,7 @@ test-docker:
 	scripts/docker-integration.sh
 
 test-e2e:
-	@echo "test-e2e: no end-to-end suite exists yet; ACME end-to-end tests start in Phase 2." >&2
-	@exit 1
+	scripts/acme-integration.sh
 
 test-clean:
 	scripts/test-clean.sh

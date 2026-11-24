@@ -1,0 +1,52 @@
+services:
+  rustinx:
+    image: ${RUSTINX_TEST_IMAGE:?}
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+    volumes:
+      - data:/data
+      - ${RUSTINX_ACME_FIXTURES:?}:/fixtures:ro
+      - ./nginx.conf:/etc/nginx/user_conf.d/default.conf:ro
+      - ./site.inc:/etc/nginx/test-site.inc:ro
+    read_only: true
+    tmpfs:
+      - /run/rustinx:uid=101,gid=101,mode=0700,size=1m
+      - /var/cache/rustinx:uid=101,gid=101,mode=0700,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      interval: 1s
+    network_mode: service:pebble
+
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:2.10.3
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+    networks:
+      default:
+        aliases:
+          - rustinx.example.test
+          - www.rustinx.example.test
+          - other.rustinx.example.test
+          - invalid.rustinx.example.test
+
+    command: ["-config", "/fixtures/pebble.json"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+      PEBBLE_AUTHZREUSE: "0"
+    volumes:
+      - ./pebble.json:/fixtures/pebble.json:ro
+
+networks:
+  default:
+    internal: true
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}
+
+volumes:
+  data:
+    labels:
+      rustinx.test-run: ${RUSTINX_TEST_RUN_ID:?}

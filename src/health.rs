@@ -23,18 +23,28 @@ pub enum ProbeError {
 
 /// Returns `Ok(())` only when the endpoint answers `200` within `timeout`.
 pub async fn probe(addr: SocketAddr, timeout: Duration) -> Result<(), ProbeError> {
-    tokio::time::timeout(timeout, request(addr))
+    tokio::time::timeout(timeout, request(addr, HEALTH_PATH))
         .await
         .map_err(|_| ProbeError::Timeout(timeout))?
+        .map(|_| ())
 }
 
-async fn request(addr: SocketAddr) -> Result<(), ProbeError> {
+pub(crate) async fn generation(addr: SocketAddr, timeout: Duration) -> Result<String, ProbeError> {
+    let response = tokio::time::timeout(timeout, request(addr, "/__rustinx/reload"))
+        .await
+        .map_err(|_| ProbeError::Timeout(timeout))??;
+    let body = response.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    Ok(body.trim().to_owned())
+}
+
+async fn request(addr: SocketAddr, path: &str) -> Result<String, ProbeError> {
     let mut stream = TcpStream::connect(addr).await?;
-    let request = format!("GET {HEALTH_PATH} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
     let mut response = Vec::new();
     stream.take(MAX_RESPONSE_BYTES).read_to_end(&mut response).await?;
-    check_status(&response)
+    check_status(&response)?;
+    Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
 fn check_status(response: &[u8]) -> Result<(), ProbeError> {

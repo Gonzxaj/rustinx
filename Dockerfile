@@ -34,6 +34,7 @@ RUN apt-get update \
 
 COPY --from=builder /usr/local/bin/rustinx /usr/local/bin/rustinx
 COPY docker/nginx.conf /etc/rustinx/nginx.conf
+COPY docker/snippets/ /etc/rustinx/snippets/
 COPY config/nginx/default.conf /etc/nginx/user_conf.d/default.conf
 COPY docker/html/ /usr/share/rustinx/html/
 

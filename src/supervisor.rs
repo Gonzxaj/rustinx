@@ -11,9 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::health;
 use crate::nginx::{Nginx, NginxError, NginxProcess};
 use crate::storage::{Storage, StorageError};
+use crate::{health, https};
 
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_FAILURE: u8 = 1;
@@ -29,6 +29,8 @@ pub enum SupervisorError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Nginx(#[from] NginxError),
+    #[error(transparent)]
+    Https(#[from] https::HttpsError),
     #[error("nginx exited during startup ({0})")]
     StartupExit(ExitStatus),
     #[error("nginx did not become healthy within {0:?}")]
@@ -55,9 +57,13 @@ impl SupervisorError {
 /// Runs until `shutdown` is cancelled (returns `Ok`) or Nginx fails (returns `Err`).
 /// Nginx is never left running when this function returns.
 pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), SupervisorError> {
-    let data_dir = config.data_dir.clone();
-    let state =
-        tokio::task::spawn_blocking(move || Storage::open(&data_dir)?.record_start(unix_now())).await??;
+    let startup_config = config.clone();
+    let (state, managed_https) = tokio::task::spawn_blocking(move || {
+        let state = Storage::open(&startup_config.data_dir)?.record_start(unix_now())?;
+        let managed_https = https::prepare_startup(&startup_config)?;
+        Ok::<_, SupervisorError>((state, managed_https))
+    })
+    .await??;
     info!(
         data_dir = %config.data_dir.display(),
         start_count = state.start_count,
@@ -66,7 +72,7 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
 
     let nginx = Nginx::new(config.nginx_bin.clone(), config.nginx_conf.clone());
     let output = tokio::select! {
-        result = nginx.test_config(config.startup_timeout) => result?,
+        result = validate_config(&nginx, config.startup_timeout, managed_https) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
     info!(conf = %config.nginx_conf.display(), "nginx configuration is valid");
@@ -106,6 +112,21 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
             stop(&mut process, config.shutdown_timeout).await?;
             Ok(())
         }
+    }
+}
+
+async fn validate_config(
+    nginx: &Nginx,
+    timeout: Duration,
+    managed_https: bool,
+) -> Result<String, SupervisorError> {
+    match nginx.test_config(timeout).await {
+        Err(NginxError::InvalidConfig { .. }) if managed_https => {
+            warn!("saved HTTPS configuration failed validation; attempting HTTP startup");
+            https::prepare_http_only()?;
+            Ok(nginx.test_config(timeout).await?)
+        }
+        result => Ok(result?),
     }
 }
 
