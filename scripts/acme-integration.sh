@@ -142,8 +142,10 @@ http() {
 }
 
 https() {
+    local host="$1"
+    shift
     in_rustinx curl --noproxy '*' --silent --show-error --fail --cacert /fixtures/issuing-root.pem --max-time 5 \
-        --resolve "$1:443:127.0.0.1" "https://$1/"
+        --resolve "$host:443:127.0.0.1" "https://$host/" "$@"
 }
 
 test "$(http rustinx.example.test /)" = 'upstream: http'
@@ -204,3 +206,83 @@ test "$(https www.rustinx.example.test)" = 'upstream: https'
 "${compose[@]}" up -d --wait --wait-timeout 60 rustinx
 test "$(https www.rustinx.example.test)" = 'upstream: https'
 echo "Managed HTTPS, proxy, redirect, invalid config rejection, rollback and restart checks passed"
+
+# Restart with the worker opted in. The a priori missing CA file is only used
+# if a new order is due, so current certificates should remain untouched.
+sed 's|/fixtures/pebble-ca.pem|/fixtures/renewal-ca.pem|' "$FIXTURES/https.toml" > "$FIXTURES/renewal.toml"
+cat >> "$FIXTURES/renewal.toml" <<'CONFIG'
+
+[renewal]
+renew_before_secs = 30
+check_interval_secs = 1
+retry_initial_secs = 12
+retry_max_secs = 12
+CONFIG
+chmod a+r "$FIXTURES/renewal.toml"
+"${compose[@]}" restart rustinx
+"${compose[@]}" up -d --wait --wait-timeout 60 rustinx
+
+wait_for() {
+    local deadline=$((SECONDS + 35))
+    until "$@"; do
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 0.5
+    done
+}
+
+renewal_failed() {
+    local logs
+    logs="$("${compose[@]}" logs --no-color rustinx)"
+    grep -qF 'automatic certificate renewal failed' <<< "$logs"
+}
+
+certificate_changed() {
+    test "$initial_chain" != "$(in_rustinx sha256sum /data/certificates/site/fullchain.pem)"
+}
+
+initial_config="$(in_rustinx sha256sum /run/rustinx/https.conf)"
+initial_chain="$(in_rustinx sha256sum /data/certificates/site/fullchain.pem)"
+served_chain() {
+    https www.rustinx.example.test -o /dev/null -w '%{certs}' | sha256sum
+}
+initial_served="$(served_chain)"
+sleep 3
+test "$initial_config" = "$(in_rustinx sha256sum /run/rustinx/https.conf)"
+test "$initial_chain" = "$(in_rustinx sha256sum /data/certificates/site/fullchain.pem)"
+
+# Advance the test certificate's recorded lifetime while keeping the served PEM valid.
+# shellcheck disable=SC2016
+in_rustinx sh -eu -c '
+    p=/data/certificates/site/metadata.json
+    now=$(date +%s)
+    umask 077
+    sed -e "s/\"not_before_unix\": [0-9]*/\"not_before_unix\": $((now - 120))/" \
+        -e "s/\"not_after_unix\": [0-9]*/\"not_after_unix\": $((now + 10))/" "$p" > "$p.test"
+    mv "$p.test" "$p"
+'
+wait_for renewal_failed
+test "$initial_chain" = "$(in_rustinx sha256sum /data/certificates/site/fullchain.pem)"
+test "$initial_config" = "$(in_rustinx sha256sum /run/rustinx/https.conf)"
+test "$(https www.rustinx.example.test)" = 'upstream: https'
+test "$initial_served" = "$(served_chain)"
+in_rustinx grep -q '"failures":1' /data/state/renewal.json
+
+cp "$FIXTURES/pebble-ca.pem" "$FIXTURES/renewal-ca.pem"
+"${compose[@]}" restart rustinx
+"${compose[@]}" up -d --wait --wait-timeout 60 rustinx
+wait_for certificate_changed
+configuration_changed() {
+    test "$initial_config" != "$(in_rustinx sha256sum /run/rustinx/https.conf)"
+}
+wait_for configuration_changed
+served_certificate_changed() {
+    local served
+    served="$(served_chain)" && test "$initial_served" != "$served"
+}
+wait_for served_certificate_changed
+test "$(https www.rustinx.example.test)" = 'upstream: https'
+test "$(https other.rustinx.example.test)" = 'upstream: https'
+final_config="$(in_rustinx sha256sum /run/rustinx/https.conf)"
+sleep 3
+test "$final_config" = "$(in_rustinx sha256sum /run/rustinx/https.conf)"
+echo "Automatic renewal, failure preservation, persisted retry and no-op checks passed"

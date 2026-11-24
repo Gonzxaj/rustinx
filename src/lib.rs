@@ -9,6 +9,7 @@ pub mod https;
 pub mod logging;
 pub mod nginx;
 mod nginx_sites;
+mod renewal;
 pub mod signals;
 pub mod storage;
 pub mod supervisor;

@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::nginx::{Nginx, NginxError, NginxProcess};
 use crate::storage::{Storage, StorageError};
-use crate::{health, https};
+use crate::{health, https, renewal};
 
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_FAILURE: u8 = 1;
@@ -102,17 +102,29 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
         "nginx is healthy"
     );
 
-    tokio::select! {
+    let worker_shutdown = shutdown.child_token();
+    let mut worker = tokio::spawn({
+        let config = config.clone();
+        let shutdown = worker_shutdown.clone();
+        async move { renewal::run(&config, shutdown).await }
+    });
+    let result = tokio::select! {
         status = process.wait() => {
-            let status = status?;
             kill_leftovers(&process);
-            Err(SupervisorError::UnexpectedExit(status))
+            Err(status.map_or_else(SupervisorError::Process, SupervisorError::UnexpectedExit))
         }
-        _ = shutdown.cancelled() => {
-            stop(&mut process, config.shutdown_timeout).await?;
-            Ok(())
-        }
+        _ = shutdown.cancelled() => stop(&mut process, config.shutdown_timeout).await,
+
+    };
+    worker_shutdown.cancel();
+    if tokio::time::timeout(Duration::from_secs(1), &mut worker)
+        .await
+        .is_err()
+    {
+        worker.abort();
+        let _ = worker.await;
     }
+    result
 }
 
 async fn validate_config(

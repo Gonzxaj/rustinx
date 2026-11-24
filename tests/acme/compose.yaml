@@ -8,6 +8,8 @@ services:
       - ${RUSTINX_ACME_FIXTURES:?}:/fixtures:ro
       - ./nginx.conf:/etc/nginx/user_conf.d/default.conf:ro
       - ./site.inc:/etc/nginx/test-site.inc:ro
+    environment:
+      RUSTINX_CERTIFICATES_CONF: /fixtures/renewal.toml
     read_only: true
     tmpfs:
       - /run/rustinx:uid=101,gid=101,mode=0700,size=1m

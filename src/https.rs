@@ -1,8 +1,9 @@
 //! Generate, validate and activate the opt-in Nginx TLS configuration.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -104,6 +105,17 @@ pub(crate) fn prepare_http_only() -> Result<(), HttpsError> {
 }
 
 pub async fn apply(config: &Config, requests: &CertificatesConfig) -> Result<(), HttpsError> {
+    apply_mode(config, requests, true).await
+}
+
+pub(crate) async fn apply_if_changed(
+    config: &Config,
+    requests: &CertificatesConfig,
+) -> Result<(), HttpsError> {
+    apply_mode(config, requests, false).await
+}
+
+async fn apply_mode(config: &Config, requests: &CertificatesConfig, force: bool) -> Result<(), HttpsError> {
     let _lock = lock_issuance(&config.data_dir)?;
     let root = fs::read_to_string(&config.nginx_conf)?;
     let staged_root = candidate_root(&root)?;
@@ -123,7 +135,15 @@ pub async fn apply(config: &Config, requests: &CertificatesConfig) -> Result<(),
     let effective = nginx.dump_config(config.startup_timeout).await?;
     let sites = nginx_sites::discover(&effective)?;
     let id = format!("{}-{}", unix_time().as_nanos(), std::process::id());
-    let candidate = render(config, requests, &sites, &id)?;
+    let template = render(config, requests, &sites, "GENERATION")?;
+    let fingerprint = fingerprint(config, requests, &effective, &template)?;
+    let fingerprint = format!("# rustinx-fingerprint {fingerprint:016x}");
+    if !force && previous.lines().nth(1) == Some(fingerprint.as_str()) {
+        return Ok(());
+    }
+    let candidate = template.replacen("GENERATION", &id, 2);
+    let (heading, body) = candidate.split_once('\n').expect("rendered generation line");
+    let candidate = format!("{heading}\n{fingerprint}\n{body}");
 
     let _staged_files = StagedFiles;
     write_atomic(Path::new(CANDIDATE), candidate.as_bytes())?;
@@ -160,6 +180,38 @@ pub async fn apply(config: &Config, requests: &CertificatesConfig) -> Result<(),
     }
     tracing::info!(generation = id, "managed HTTPS configuration loaded");
     Ok(())
+}
+
+fn fingerprint(
+    config: &Config,
+    requests: &CertificatesConfig,
+    effective: &str,
+    template: &str,
+) -> Result<u64, HttpsError> {
+    let mut hash = DefaultHasher::new();
+    template.hash(&mut hash);
+    let mut files = BTreeMap::<&str, Vec<&str>>::new();
+    let mut path = "";
+    for line in effective.lines().filter(|line| !line.is_empty()) {
+        if let Some(file) = line
+            .strip_prefix("# configuration file ")
+            .and_then(|line| line.strip_suffix(':'))
+        {
+            path = file;
+        } else if path != ACTIVE {
+            files.entry(path).or_default().push(line);
+        }
+    }
+    files.hash(&mut hash);
+    let store = CertStore::new(&config.data_dir);
+    for request in requests
+        .certificates
+        .iter()
+        .filter(|request| request.https.is_some())
+    {
+        fs::read(store.certificate_dir(&request.id).join("fullchain.pem"))?.hash(&mut hash);
+    }
+    Ok(hash.finish())
 }
 
 fn candidate_root(root: &str) -> Result<String, HttpsError> {

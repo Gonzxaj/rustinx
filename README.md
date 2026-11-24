@@ -2,8 +2,7 @@
 
 Docker image that runs Nginx supervised by a Rust manager. The goal (see `DEVELOPMENT.md`) is
 automatic ACME certificate management. The image supervises Nginx and can issue certificates on
-demand using ACME HTTP-01. HTTPS activation is opt-in per certificate. Automatic renewal
-is a later roadmap item.
+demand using ACME HTTP-01. HTTPS activation and background renewal are opt-in.
 
 ## How it works
 
@@ -151,6 +150,30 @@ To remove managed HTTPS, remove the `[certificate.https]` entries and run `rusti
 
 Publish container TCP 443 in Docker if clients need direct HTTPS access to Nginx. The public
 TLS connection at Cloudflare Tunnel is separate from the tunnel's configured origin protocol.
+
+## Enable automatic renewal
+
+Add a top-level `[renewal]` section to the mounted `certificates.toml` and restart the
+Rustinx container. An empty section uses the following defaults:
+
+```toml
+[renewal]
+renew_before_secs = 2592000
+check_interval_secs = 43200
+retry_initial_secs = 60
+retry_max_secs = 3600
+rate_limit_delay_secs = 172800
+```
+
+The worker runs after Nginx becomes ready and checks for missing, expired or soon-to-expire
+certificates. The renewal window is capped at half of each certificate's lifetime to avoid
+reissuing short-lived certificates immediately. HTTP-01 must remain reachable at renewal time.
+
+The worker retries failures with bounded exponential backoff and persists its next attempt in
+`/data/state/renewal.json`. Recognized ACME rate-limit errors use the configured longer delay.
+`instant-acme` does not expose response headers on those errors, so this delay is a local setting.
+For managed HTTPS, Rustinx reloads after changes to the certificate or effective configuration.
+For HTTPS configured manually, the worker updates the PEM files and you manage the Nginx reload.
 
 ### Reference the PEM files in Nginx
 

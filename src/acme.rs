@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::cert_store::{CertStore, CertStoreError, METADATA_SCHEMA_VERSION};
+use crate::cert_store::{CertStore, CertStoreError, CertificateMetadata, METADATA_SCHEMA_VERSION};
 use crate::certificates::{AcmeSettings, CertificateRequest, CertificatesConfig};
 use crate::storage::{Storage, StorageError, write_atomic};
 
@@ -33,6 +33,8 @@ pub enum IssueError {
     AccountDirectoryMismatch,
     #[error("ACME request failed while {0}")]
     Acme(&'static str),
+    #[error("ACME rate limit while {0}")]
+    RateLimited(&'static str),
     #[error("ACME authorization is {0:?}")]
     Authorization(AuthorizationStatus),
     #[error("ACME server did not offer HTTP-01")]
@@ -60,6 +62,16 @@ pub async fn issue(
     config: &CertificatesConfig,
     shutdown: CancellationToken,
 ) -> Result<(), IssueError> {
+    issue_with_clock(data_dir, config, shutdown, 0, SystemTime::now).await
+}
+
+pub(crate) async fn issue_with_clock(
+    data_dir: &Path,
+    config: &CertificatesConfig,
+    shutdown: CancellationToken,
+    renew_before_secs: u64,
+    now: impl Fn() -> SystemTime,
+) -> Result<(), IssueError> {
     if config.certificates.is_empty() {
         return Ok(());
     }
@@ -80,7 +92,7 @@ pub async fn issue(
     let result = tokio::select! {
         biased;
         () = shutdown.cancelled() => Err(IssueError::Cancelled),
-        result = issue_all(config, &store, &challenges) => result,
+        result = issue_all(config, &store, &challenges, renew_before_secs, now) => result,
     };
     let cleanup = clear_challenges(&challenges);
     if let Err(err) = &cleanup {
@@ -125,22 +137,26 @@ async fn issue_all(
     config: &CertificatesConfig,
     store: &CertStore,
     challenges: &Path,
+    renew_before_secs: u64,
+    now: impl Fn() -> SystemTime,
 ) -> Result<(), IssueError> {
     let settings = &config.acme;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| IssueError::Clock)?;
-    let timestamp = i64::try_from(now.as_secs()).map_err(|_| IssueError::Clock)?;
     let mut account = None;
 
     for request in &config.certificates {
+        let timestamp = i64::try_from(
+            now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| IssueError::Clock)?
+                .as_secs(),
+        )
+        .map_err(|_| IssueError::Clock)?;
         store.recover(&request.id)?;
         let reusable = store.load_metadata(&request.id)?.is_some_and(|metadata| {
             metadata.schema_version == METADATA_SCHEMA_VERSION
                 && metadata.domains == request.domains
                 && metadata.directory == settings.directory
-                && metadata.not_before_unix <= timestamp
-                && metadata.not_after_unix > timestamp
+                && !needs_renewal(&metadata, timestamp, renew_before_secs)
                 && ["privkey.pem", "cert.pem", "chain.pem", "fullchain.pem"]
                     .iter()
                     .all(|name| store.certificate_dir(&request.id).join(name).is_file())
@@ -148,6 +164,9 @@ async fn issue_all(
         if reusable {
             info!(certificate = %request.id, "existing certificate is current");
             continue;
+        }
+        if renew_before_secs > 0 {
+            info!(certificate = %request.id, "automatic certificate issuance due");
         }
         let account = match &account {
             Some(account) => account,
@@ -163,9 +182,7 @@ async fn issue_all(
         )
         .await
         .map_err(|_| IssueError::Timeout)??;
-        let issued_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| IssueError::Clock)?;
+        let issued_at = now().duration_since(UNIX_EPOCH).map_err(|_| IssueError::Clock)?;
         store.install(
             &request.id,
             &chain,
@@ -177,6 +194,17 @@ async fn issue_all(
         info!(certificate = %request.id, "certificate issued");
     }
     Ok(())
+}
+
+fn needs_renewal(metadata: &CertificateMetadata, now: i64, threshold: u64) -> bool {
+    // Cap the window at half the lifetime so short-lived certificates do not
+    // immediately renew again when the configured threshold exceeds their lifetime.
+    let lifetime = metadata
+        .not_after_unix
+        .saturating_sub(metadata.not_before_unix)
+        .max(0);
+    let window = threshold.min(lifetime as u64 / 2) as i64;
+    metadata.not_before_unix > now || metadata.not_after_unix.saturating_sub(now) <= window
 }
 
 async fn open_account(settings: &AcmeSettings, store: &CertStore) -> Result<Account, IssueError> {
@@ -270,6 +298,12 @@ async fn obtain(
 fn acme<T>(result: Result<T, instant_acme::Error>, step: &'static str) -> Result<T, IssueError> {
     result.map_err(|err| match err {
         instant_acme::Error::Timeout(_) => IssueError::Timeout,
+        instant_acme::Error::Api(problem)
+            if problem.status == Some(429)
+                || problem.r#type.as_deref() == Some("urn:ietf:params:acme:error:rateLimited") =>
+        {
+            IssueError::RateLimited(step)
+        }
         _ => IssueError::Acme(step),
     })
 }
@@ -310,6 +344,51 @@ impl Drop for ChallengeResponses {
 mod tests {
     use super::*;
 
+    #[test]
+    fn advancing_time_detects_approaching_and_expired_certificates() {
+        let metadata = CertificateMetadata {
+            schema_version: METADATA_SCHEMA_VERSION,
+            domains: vec![],
+            directory: String::new(),
+            issued_at_unix: 100,
+            not_before_unix: 100,
+            not_after_unix: 200,
+        };
+        assert!(!needs_renewal(&metadata, 179, 20));
+        assert!(needs_renewal(&metadata, 180, 20));
+        assert!(needs_renewal(&metadata, 200, 0));
+        assert!(!needs_renewal(&metadata, 149, 10_000));
+        assert!(needs_renewal(&metadata, 150, 10_000));
+    }
+
+    #[test]
+    fn recognizes_rate_limit_problem_without_logging_server_details() {
+        let problem = serde_json::from_str(
+            r#"{"type":"urn:ietf:params:acme:error:rateLimited","status":503,"detail":"private"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            acme::<()>(Err(instant_acme::Error::Api(problem)), "ordering"),
+            Err(IssueError::RateLimited("ordering"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_worker_cleans_up_and_allows_another_issuance() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let requests = hanging_ca_config(listener.local_addr().unwrap());
+        let data = tempfile::tempdir().unwrap();
+        let shutdown = CancellationToken::new();
+        let (result, ()) = tokio::join!(issue(data.path(), &requests, shutdown.clone()), async {
+            let (_connection, _) = listener.accept().await.unwrap();
+            assert!(matches!(lock_issuance(data.path()), Err(IssueError::Busy)));
+            shutdown.cancel();
+        });
+        assert!(matches!(result, Err(IssueError::Cancelled)));
+        assert!(!data.path().join("challenges/http-01").exists());
+        assert!(lock_issuance(data.path()).is_ok());
+    }
+
     #[tokio::test]
     async fn unresponsive_ca_times_out_and_releases_issuance_lock() {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -320,7 +399,17 @@ mod tests {
         });
 
         let data = tempfile::tempdir().unwrap();
-        let config = CertificatesConfig::parse(&format!(
+        let config = hanging_ca_config(addr);
+        let result = issue(data.path(), &config, CancellationToken::new()).await;
+        ca.abort();
+
+        assert!(matches!(result, Err(IssueError::Timeout)), "{result:?}");
+        assert!(!data.path().join("challenges/http-01").exists());
+        assert!(lock_issuance(data.path()).is_ok());
+    }
+
+    fn hanging_ca_config(addr: std::net::SocketAddr) -> CertificatesConfig {
+        CertificatesConfig::parse(&format!(
             r#"
 [acme]
 directory = "https://{addr}/dir"
@@ -332,12 +421,6 @@ id = "site"
 domains = ["example.test"]
 "#
         ))
-        .unwrap();
-        let result = issue(data.path(), &config, CancellationToken::new()).await;
-        ca.abort();
-
-        assert!(matches!(result, Err(IssueError::Timeout)), "{result:?}");
-        assert!(!data.path().join("challenges/http-01").exists());
-        assert!(lock_issuance(data.path()).is_ok());
+        .unwrap()
     }
 }

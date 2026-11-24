@@ -34,6 +34,7 @@ pub enum CertificatesError {
 #[serde(deny_unknown_fields)]
 struct RawFile {
     acme: RawAcme,
+    renewal: Option<RenewalSettings>,
     #[serde(default, rename = "certificate")]
     certificates: Vec<CertificateRequest>,
 }
@@ -85,9 +86,37 @@ pub struct HttpsSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificatesConfig {
     pub acme: AcmeSettings,
+    pub renewal: Option<RenewalSettings>,
     pub certificates: Vec<CertificateRequest>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RenewalSettings {
+    pub renew_before_secs: u64,
+    pub check_interval_secs: u64,
+    pub retry_initial_secs: u64,
+    pub retry_max_secs: u64,
+    pub rate_limit_delay_secs: u64,
+}
+
+impl Default for RenewalSettings {
+    fn default() -> Self {
+        Self {
+            renew_before_secs: 30 * 86_400,
+            check_interval_secs: 12 * 3600,
+            retry_initial_secs: 60,
+            retry_max_secs: 3600,
+            rate_limit_delay_secs: 48 * 3600,
+        }
+    }
+}
+
+pub(crate) fn config_path() -> PathBuf {
+    std::env::var_os(ENV_CERTIFICATES_CONF)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CERTIFICATES_CONF))
+}
 impl CertificatesConfig {
     /// Returns `Ok(None)` when the file does not exist. Blocking: call from `spawn_blocking`.
     pub fn load(path: &Path) -> Result<Option<Self>, CertificatesError> {
@@ -107,6 +136,17 @@ impl CertificatesConfig {
     pub fn parse(text: &str) -> Result<Self, ParseError> {
         let raw: RawFile = toml::from_str(text).map_err(|err| ParseError::Toml(Box::new(err)))?;
         let acme = validate_acme(raw.acme)?;
+        if let Some(renewal) = raw.renewal
+            && (!(1..=365 * 86_400).contains(&renewal.renew_before_secs)
+                || !(1..=86_400).contains(&renewal.check_interval_secs)
+                || !(1..=86_400).contains(&renewal.retry_initial_secs)
+                || !(renewal.retry_initial_secs..=7 * 86_400).contains(&renewal.retry_max_secs)
+                || !(1..=30 * 86_400).contains(&renewal.rate_limit_delay_secs))
+        {
+            return Err(ParseError::Invalid(
+                "invalid renewal threshold, interval or retry limits".into(),
+            ));
+        }
         let mut ids = HashSet::new();
         for cert in &raw.certificates {
             validate_id(&cert.id)?;
@@ -134,6 +174,7 @@ impl CertificatesConfig {
         }
         Ok(Self {
             acme,
+            renewal: raw.renewal,
             certificates: raw.certificates,
         })
     }

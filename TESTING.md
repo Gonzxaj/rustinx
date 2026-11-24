@@ -804,6 +804,19 @@ restored the last confirmed HTTPS configuration.
 The same revision passed 38 Rust unit tests, 12 supervisor integration tests, 40
 real-Nginx Docker checks, Rust formatting, Clippy and ShellCheck on the integration script.
 
+### Phase 4 automatic renewal
+
+The Docker end-to-end suite simulates a nearly expired certificate by changing the metadata
+in its isolated test volume. A missing CA trust file forces the first attempt to fail.
+The test verifies that Nginx continues serving the prior certificate, restarts Rustinx
+with the persisted retry state, restores CA trust and verifies the certificate served
+over TLS changes after the retry. It also checks that subsequent checks leave the Nginx
+configuration unchanged.
+
+Rust tests exercise expiry boundaries with simulated timestamps, short certificate
+lifetimes, ACME rate-limit classification, retry caps and persistence, and cancellation
+of an in-flight request without leaving its issuance lock held.
+
 ## 15. Final rule
 
 When a test cannot be performed safely without modifying existing infrastructure, do not perform it.
