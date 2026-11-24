@@ -1,5 +1,10 @@
 //! Nginx command invocation. Every command uses explicit arguments; no shell is involved.
 
+pub mod health;
+pub mod https;
+mod sites;
+pub mod supervisor;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;

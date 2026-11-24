@@ -10,10 +10,11 @@ use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use super::{Nginx, NginxError, NginxProcess};
+use super::{health, https};
+use crate::acme::renewal;
 use crate::config::Config;
-use crate::nginx::{Nginx, NginxError, NginxProcess};
 use crate::storage::{Storage, StorageError};
-use crate::{health, https, renewal};
 
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_FAILURE: u8 = 1;
@@ -64,8 +65,7 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
         Ok::<_, SupervisorError>((state, managed_https))
     })
     .await??;
-    info!(
-        data_dir = %config.data_dir.display(),
+    info!(target: "rustinx::supervisor", data_dir = %config.data_dir.display(),
         start_count = state.start_count,
         "persistent storage ready"
     );
@@ -75,13 +75,13 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
         result = validate_config(&nginx, config.startup_timeout, managed_https) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
-    info!(conf = %config.nginx_conf.display(), "nginx configuration is valid");
+    info!(target: "rustinx::supervisor", conf = %config.nginx_conf.display(), "nginx configuration is valid");
     if !output.is_empty() {
-        debug!(output = %output, "nginx -t output");
+        debug!(target: "rustinx::supervisor", output = %output, "nginx -t output");
     }
 
     let mut process = nginx.spawn()?;
-    info!(pid = process.pid(), "nginx started");
+    info!(target: "rustinx::supervisor", pid = process.pid(), "nginx started");
 
     let started = Instant::now();
     let ready = tokio::select! {
@@ -93,12 +93,11 @@ pub async fn run(config: &Config, shutdown: CancellationToken) -> Result<(), Sup
         }
     };
     if !ready {
-        error!(timeout = ?config.startup_timeout, "nginx did not become healthy; stopping it");
+        error!(target: "rustinx::supervisor", timeout = ?config.startup_timeout, "nginx did not become healthy; stopping it");
         stop(&mut process, config.shutdown_timeout).await?;
         return Err(SupervisorError::StartupTimeout(config.startup_timeout));
     }
-    info!(
-        elapsed_ms = started.elapsed().as_millis() as u64,
+    info!(target: "rustinx::supervisor", elapsed_ms = started.elapsed().as_millis() as u64,
         "nginx is healthy"
     );
 
@@ -134,7 +133,7 @@ async fn validate_config(
 ) -> Result<String, SupervisorError> {
     match nginx.test_config(timeout).await {
         Err(NginxError::InvalidConfig { .. }) if managed_https => {
-            warn!("saved HTTPS configuration failed validation; attempting HTTP startup");
+            warn!(target: "rustinx::supervisor", "saved HTTPS configuration failed validation; attempting HTTP startup");
             https::prepare_http_only()?;
             Ok(nginx.test_config(timeout).await?)
         }
@@ -147,7 +146,7 @@ async fn wait_until_healthy(config: &Config) -> bool {
     loop {
         match health::probe(config.health_addr, PROBE_TIMEOUT).await {
             Ok(()) => return true,
-            Err(err) => debug!(error = %err, "nginx not ready yet"),
+            Err(err) => debug!(target: "rustinx::supervisor", error = %err, "nginx not ready yet"),
         }
         if Instant::now() + READINESS_POLL_INTERVAL >= deadline {
             return false;
@@ -160,14 +159,14 @@ async fn wait_until_healthy(config: &Config) -> bool {
 async fn stop(process: &mut NginxProcess, timeout: Duration) -> Result<(), SupervisorError> {
     let pid = process.pid();
     if process.signal(Signal::SIGQUIT)? {
-        info!(pid, timeout = ?timeout, "graceful nginx shutdown requested (SIGQUIT)");
+        info!(target: "rustinx::supervisor", pid, timeout = ?timeout, "graceful nginx shutdown requested (SIGQUIT)");
     }
     match tokio::time::timeout(timeout, process.wait()).await {
-        Ok(status) => info!(pid, status = %status?, "nginx stopped"),
+        Ok(status) => info!(target: "rustinx::supervisor", pid, status = %status?, "nginx stopped"),
         Err(_) => {
-            warn!(pid, timeout = ?timeout, "nginx did not stop in time; sending SIGKILL");
+            warn!(target: "rustinx::supervisor", pid, timeout = ?timeout, "nginx did not stop in time; sending SIGKILL");
             process.kill().await?;
-            info!(pid, "nginx killed");
+            info!(target: "rustinx::supervisor", pid, "nginx killed");
         }
     }
     kill_leftovers(process);
@@ -177,9 +176,11 @@ async fn stop(process: &mut NginxProcess, timeout: Duration) -> Result<(), Super
 /// Ensures no Nginx process outlives its master.
 fn kill_leftovers(process: &NginxProcess) {
     match process.kill_group() {
-        Ok(true) => warn!("killed processes left in the nginx process group"),
+        Ok(true) => warn!(target: "rustinx::supervisor", "killed processes left in the nginx process group"),
         Ok(false) => {}
-        Err(err) => warn!(error = %err, "failed to kill the nginx process group"),
+        Err(err) => {
+            warn!(target: "rustinx::supervisor", error = %err, "failed to kill the nginx process group")
+        }
     }
 }
 

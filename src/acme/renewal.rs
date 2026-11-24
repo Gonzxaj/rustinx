@@ -9,10 +9,10 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::acme::{self, IssueError};
-use crate::certificates::{CertificatesConfig, CertificatesError, RenewalSettings, config_path};
+use super::certificates::{CertificatesConfig, CertificatesError, RenewalSettings, config_path};
+use super::{IssueError, issue_with_clock};
 use crate::config::Config;
-use crate::https::{self, HttpsError};
+use crate::nginx::https::{self, HttpsError};
 use crate::storage::{StorageError, write_atomic};
 
 #[derive(Debug, Error)]
@@ -67,14 +67,14 @@ fn read_retry(path: &Path) -> Result<Retry, RenewalError> {
 pub(crate) async fn run(config: &Config, shutdown: CancellationToken) {
     let path = config_path();
     if !path.is_absolute() {
-        warn!(error = %RenewalError::RelativePath, "automatic renewal unavailable");
+        warn!(target: "rustinx::renewal", error = %RenewalError::RelativePath, "automatic renewal unavailable");
         return;
     }
     let retry_path = config.data_dir.join("state/renewal.json");
     let mut retry = match read_retry(&retry_path) {
         Ok(retry) => retry,
         Err(err) => {
-            warn!(error = %err, "could not recover renewal retry state");
+            warn!(target: "rustinx::renewal", error = %err, "could not recover renewal retry state");
             return;
         }
     };
@@ -87,8 +87,7 @@ pub(crate) async fn run(config: &Config, shutdown: CancellationToken) {
             Ok(Some(requests)) if requests.renewal.is_some() => {
                 let policy = requests.renewal.expect("renewal configured");
                 if !enabled {
-                    info!(
-                        check_interval_secs = policy.check_interval_secs,
+                    info!(target: "rustinx::renewal", check_interval_secs = policy.check_interval_secs,
                         "automatic certificate renewal enabled"
                     );
                     enabled = true;
@@ -103,29 +102,29 @@ pub(crate) async fn run(config: &Config, shutdown: CancellationToken) {
                     }
                     let delay = match result {
                         Ok(()) => {
-                            debug!("automatic certificate check completed");
+                            debug!(target: "rustinx::renewal", "automatic certificate check completed");
                             retry = Retry::default();
                             policy.check_interval_secs
                         }
                         Err(err) => {
                             let rate_limited = matches!(err, RenewalError::Issue(IssueError::RateLimited(_)));
                             let delay = retry.failed(unix_seconds(), policy, rate_limited);
-                            warn!(error = %err, rate_limited, retry_in_secs = delay, "automatic certificate renewal failed");
+                            warn!(target: "rustinx::renewal", error = %err, rate_limited, retry_in_secs = delay, "automatic certificate renewal failed");
                             delay
                         }
                     };
                     if let Err(err) = save_retry(&retry_path, &retry) {
-                        warn!(error = %err, "could not save renewal retry state");
+                        warn!(target: "rustinx::renewal", error = %err, "could not save renewal retry state");
                     }
                     delay
                 }
             }
             Ok(_) => {
-                debug!("automatic certificate renewal disabled");
+                debug!(target: "rustinx::renewal", "automatic certificate renewal disabled");
                 return;
             }
             Err(err) => {
-                warn!(error = %err, "could not load automatic renewal configuration");
+                warn!(target: "rustinx::renewal", error = %err, "could not load automatic renewal configuration");
                 RenewalSettings::default().retry_initial_secs
             }
         };
@@ -147,7 +146,7 @@ async fn renew(
     shutdown: &CancellationToken,
     policy: RenewalSettings,
 ) -> Result<(), RenewalError> {
-    acme::issue_with_clock(
+    issue_with_clock(
         &config.data_dir,
         requests,
         shutdown.clone(),

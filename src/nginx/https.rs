@@ -11,13 +11,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
+use super::health::{self, ProbeError};
+use super::sites::{self, DiscoveryError};
+use super::{Nginx, NginxError};
+use crate::acme::cert_store::{CertStore, CertStoreError, METADATA_SCHEMA_VERSION};
+use crate::acme::certificates::CertificatesConfig;
 use crate::acme::{IssueError, lock_issuance};
-use crate::cert_store::{CertStore, CertStoreError, METADATA_SCHEMA_VERSION};
-use crate::certificates::CertificatesConfig;
 use crate::config::Config;
-use crate::health::{self, ProbeError};
-use crate::nginx::{Nginx, NginxError};
-use crate::nginx_sites::{self, DiscoveryError};
 use crate::storage::{StorageError, write_atomic};
 
 const ACTIVE: &str = "/run/rustinx/https.conf";
@@ -133,7 +133,7 @@ async fn apply_mode(config: &Config, requests: &CertificatesConfig, force: bool)
     }
 
     let effective = nginx.dump_config(config.startup_timeout).await?;
-    let sites = nginx_sites::discover(&effective)?;
+    let sites = sites::discover(&effective)?;
     let id = format!("{}-{}", unix_time().as_nanos(), std::process::id());
     let template = render(config, requests, &sites, "GENERATION")?;
     let fingerprint = fingerprint(config, requests, &effective, &template)?;
@@ -154,7 +154,7 @@ async fn apply_mode(config: &Config, requests: &CertificatesConfig, force: bool)
         return Err(HttpsError::Conflict);
     }
     // Relative includes could resolve differently when the main config is under /run.
-    nginx_sites::discover(&staged.dump_config(config.startup_timeout).await?)?;
+    sites::discover(&staged.dump_config(config.startup_timeout).await?)?;
 
     let activation = async {
         write_atomic(active_path, candidate.as_bytes())?;
@@ -178,7 +178,7 @@ async fn apply_mode(config: &Config, requests: &CertificatesConfig, force: bool)
             }),
         };
     }
-    tracing::info!(generation = id, "managed HTTPS configuration loaded");
+    tracing::info!(target: "rustinx::https", generation = id, "managed HTTPS configuration loaded");
     Ok(())
 }
 
@@ -237,10 +237,10 @@ fn candidate_root(root: &str) -> Result<String, HttpsError> {
 fn render(
     config: &Config,
     requests: &CertificatesConfig,
-    sites: &[nginx_sites::Site],
+    sites: &[sites::Site],
     id: &str,
 ) -> Result<String, HttpsError> {
-    let names = nginx_sites::by_name(sites);
+    let names = sites::by_name(sites);
     let mut assigned = HashSet::new();
     let mut redirects = Vec::new();
     let mut servers = String::new();
@@ -360,7 +360,7 @@ impl Drop for StagedFiles {
             if let Err(err) = fs::remove_file(path)
                 && err.kind() != io::ErrorKind::NotFound
             {
-                tracing::warn!(path, error = %err, "could not remove staged Nginx file");
+                tracing::warn!(target: "rustinx::https", path, error = %err, "could not remove staged Nginx file");
             }
         }
     }

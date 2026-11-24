@@ -15,8 +15,8 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::cert_store::{CertStore, CertStoreError, CertificateMetadata, METADATA_SCHEMA_VERSION};
-use crate::certificates::{AcmeSettings, CertificateRequest, CertificatesConfig};
+use super::cert_store::{CertStore, CertStoreError, CertificateMetadata, METADATA_SCHEMA_VERSION};
+use super::certificates::{AcmeSettings, CertificateRequest, CertificatesConfig};
 use crate::storage::{Storage, StorageError, write_atomic};
 
 #[derive(Debug, Error)]
@@ -96,7 +96,7 @@ pub(crate) async fn issue_with_clock(
     };
     let cleanup = clear_challenges(&challenges);
     if let Err(err) = &cleanup {
-        tracing::error!(error = %err, "could not clean HTTP-01 responses");
+        tracing::error!(target: "rustinx::acme", error = %err, "could not clean HTTP-01 responses");
     }
     result.and(cleanup)
 }
@@ -162,11 +162,11 @@ async fn issue_all(
                     .all(|name| store.certificate_dir(&request.id).join(name).is_file())
         });
         if reusable {
-            info!(certificate = %request.id, "existing certificate is current");
+            info!(target: "rustinx::acme", certificate = %request.id, "existing certificate is current");
             continue;
         }
         if renew_before_secs > 0 {
-            info!(certificate = %request.id, "automatic certificate issuance due");
+            info!(target: "rustinx::acme", certificate = %request.id, "automatic certificate issuance due");
         }
         let account = match &account {
             Some(account) => account,
@@ -191,7 +191,7 @@ async fn issue_all(
             &settings.directory,
             issued_at.as_secs(),
         )?;
-        info!(certificate = %request.id, "certificate issued");
+        info!(target: "rustinx::acme", certificate = %request.id, "certificate issued");
     }
     Ok(())
 }
@@ -223,7 +223,7 @@ async fn open_account(settings: &AcmeSettings, store: &CertStore) -> Result<Acco
             builder.from_credentials(saved.credentials).await,
             "restoring account",
         )?;
-        info!("ACME account restored");
+        info!(target: "rustinx::acme", "ACME account restored");
         return Ok(account);
     }
 
@@ -249,7 +249,7 @@ async fn open_account(settings: &AcmeSettings, store: &CertStore) -> Result<Acco
             credentials,
         },
     )?;
-    info!("ACME account registered");
+    info!(target: "rustinx::acme", "ACME account registered");
     Ok(account)
 }
 
@@ -334,7 +334,7 @@ impl Drop for ChallengeResponses {
             if let Err(err) = fs::remove_file(path)
                 && err.kind() != io::ErrorKind::NotFound
             {
-                tracing::warn!(error = %err, "could not remove HTTP-01 response");
+                tracing::warn!(target: "rustinx::acme", error = %err, "could not remove HTTP-01 response");
             }
         }
     }
