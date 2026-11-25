@@ -786,7 +786,7 @@ run-scoped resources.
 ### Phase 2 public Staging result
 
 On 2026-11-24, the Docker development instance served the exact HTTP-01 probe body over
-the public Cloudflare Tunnel route for `acme-test.example.com`. The same instance registered
+the public Cloudflare Tunnel route for the dedicated test hostname. The same instance registered
 an account and obtained a certificate from Let's Encrypt Staging. The full chain and private key
 persisted in the Docker data volume, the key mode was `0600`, and the challenge directory was
 removed after issuance.
@@ -829,7 +829,7 @@ The existing Docker end-to-end suite
 continues to cover HTTP-01, HTTPS activation and renewal.
 
 On 2026-11-24, public Let's Encrypt Staging issued a DNS-01 certificate for
-`acme-test.example.com` and `*.acme-test.example.com`. The X.509 SAN extension
+the dedicated test hostname and its wildcard. The X.509 SAN extension
 contained both names, the private key had mode `0600`, and a Cloudflare API query
 confirmed that no Rustinx TXT records remained at the challenge name. The one-off
 Docker container did not start Nginx or open a public port.

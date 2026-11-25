@@ -1,6 +1,6 @@
 # rustinx
 
-Docker image that runs Nginx supervised by a Rust manager. The goal (see `DEVELOPMENT.md`) is
+Docker image that runs Nginx supervised by a Rust manager. The goal is
 automatic ACME certificate management. The image supervises Nginx and can issue certificates on
 demand using ACME HTTP-01. HTTPS activation and background renewal are opt-in.
 

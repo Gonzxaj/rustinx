@@ -12,3 +12,6 @@
 
 certificates.toml
 rustinx-data.*.tar.gz
+
+/CLAUDE.md
+/DEVELOPMENT.md
